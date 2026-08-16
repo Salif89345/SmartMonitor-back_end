@@ -14,7 +14,10 @@ from app.models import (
     DeviceMembership,
     User,
 )
-from app.mqtt_client import mqtt_manager
+from app.mqtt_client import (
+    DeviceUnavailableError,
+    mqtt_manager,
+)
 from app.schemas import DeviceCommandResponse
 
 
@@ -28,7 +31,6 @@ router = APIRouter(
     "/{device_id}/commands/ping",
     response_model=DeviceCommandResponse,
 )
-
 def ping_device(
     device_id: int,
     current_user: User = Depends(
@@ -86,6 +88,13 @@ def ping_device(
             command="ping",
             parameters={},
             timeout=5.0,
+        )
+
+    except DeviceUnavailableError:
+        raise HTTPException(
+            status_code=
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Device unavailable",
         )
 
     except TimeoutError:
