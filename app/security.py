@@ -1,29 +1,17 @@
-import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from dotenv import load_dotenv
 from jwt.exceptions import InvalidTokenError
 from pwdlib import PasswordHash
 
-
-load_dotenv()
+from app.settings import (
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES,
+    JWT_ALGORITHM,
+    JWT_SECRET_KEY,
+)
 
 
 password_hash = PasswordHash.recommended()
-
-
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-JWT_ALGORITHM = os.getenv(
-    "JWT_ALGORITHM",
-    "HS256",
-)
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(
-    os.getenv(
-        "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
-        "30",
-    )
-)
 
 
 if not JWT_SECRET_KEY:
@@ -76,7 +64,17 @@ def decode_access_token(
         payload = jwt.decode(
             token,
             JWT_SECRET_KEY,
-            algorithms=[JWT_ALGORITHM],
+            algorithms=[
+                JWT_ALGORITHM,
+            ],
+            options={
+                "require": [
+                    "sub",
+                    "iat",
+                    "exp",
+                    "type",
+                ],
+            },
         )
 
         if payload.get("type") != "access":

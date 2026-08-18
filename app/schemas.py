@@ -29,6 +29,24 @@ class UserPublic(BaseModel):
     email_verified: bool
 
 
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+
+    code: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^[0-9]{6}$",
+    )
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class VerificationMessageResponse(BaseModel):
+    message: str
+
+
 class LoginRequest(BaseModel):
     email: EmailStr
 
@@ -41,8 +59,27 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     authenticated: bool
     access_token: str
+    refresh_token: str
     token_type: str
     user: UserPublic
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(
+        min_length=32,
+        max_length=512,
+    )
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str = Field(
+        min_length=32,
+        max_length=512,
+    )
+
+
+class LogoutResponse(BaseModel):
+    message: str
 
 
 class DeviceAccessPublic(BaseModel):
@@ -56,6 +93,16 @@ class DeviceAccessPublic(BaseModel):
         "owner",
         "member",
     ]
+
+
+class AddDeviceMemberRequest(BaseModel):
+    email: EmailStr
+
+
+class DeviceMemberPublic(BaseModel):
+    user_id: int
+    email: EmailStr
+    role: Literal["member"]
 
 
 class DeviceCommandResponse(BaseModel):
@@ -127,3 +174,15 @@ class DeviceHistoryResponse(BaseModel):
     summary: HistorySummary
 
     points: list[HistoryPoint]
+
+
+class DeviceEventPublic(BaseModel):
+    model_config = ConfigDict(
+        from_attributes=True
+    )
+
+    id: int
+    device_id: int
+    event_type: str
+    data: dict[str, Any] | None
+    created_at: datetime

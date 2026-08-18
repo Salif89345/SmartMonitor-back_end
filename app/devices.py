@@ -8,7 +8,7 @@ from fastapi import (
     Query,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -25,12 +25,16 @@ from app.history_service import (
 from app.models import (
     Device,
     DeviceChannel,
+    DeviceEvent,
     DeviceMembership,
     User,
 )
 from app.schemas import (
+    AddDeviceMemberRequest,
     DeviceAccessPublic,
+    DeviceEventPublic,
     DeviceHistoryResponse,
+    DeviceMemberPublic,
 )
 
 
@@ -140,6 +144,312 @@ def get_my_device(
         device,
         role,
     )
+
+
+DEVICE_MEMBER_LIMIT = 10
+
+
+def _require_owner(
+    device_id: int,
+    current_user: User,
+    db: Session,
+    *,
+    lock_device: bool = False,
+) -> Device:
+    device_query = select(Device).where(
+        Device.id == device_id
+    )
+
+    if lock_device:
+        device_query = (
+            device_query.with_for_update()
+        )
+
+    device = db.scalar(
+        device_query
+    )
+
+    if device is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+
+    membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id
+            == device_id,
+            DeviceMembership.user_id
+            == current_user.id,
+        )
+    )
+
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+
+    if membership.role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Owner access required",
+        )
+
+    return device
+
+
+@router.get(
+    "/{device_id}/members",
+    response_model=list[DeviceMemberPublic],
+)
+def list_device_members(
+    device_id: int,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    _require_owner(
+        device_id,
+        current_user,
+        db,
+    )
+
+    rows = db.execute(
+        select(
+            User.id,
+            User.email,
+        )
+        .join(
+            DeviceMembership,
+            DeviceMembership.user_id
+            == User.id,
+        )
+        .where(
+            DeviceMembership.device_id
+            == device_id,
+            DeviceMembership.role
+            == "member",
+        )
+        .order_by(
+            User.id
+        )
+    ).all()
+
+    return [
+        DeviceMemberPublic(
+            user_id=user_id,
+            email=email,
+            role="member",
+        )
+        for user_id, email in rows
+    ]
+
+
+@router.post(
+    "/{device_id}/members",
+    response_model=DeviceMemberPublic,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_device_member(
+    device_id: int,
+    payload: AddDeviceMemberRequest,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    _require_owner(
+        device_id,
+        current_user,
+        db,
+        lock_device=True,
+    )
+
+    normalized_email = payload.email.lower()
+
+    member_user = db.scalar(
+        select(User).where(
+            User.email == normalized_email
+        )
+    )
+
+    if (
+        member_user is None
+        or not member_user.is_active
+        or not member_user.email_verified
+    ):
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not available",
+        )
+
+    existing_membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id
+            == device_id,
+            DeviceMembership.user_id
+            == member_user.id,
+        )
+    )
+
+    if existing_membership is not None:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User already has access",
+        )
+
+    member_count = db.scalar(
+        select(func.count())
+        .select_from(DeviceMembership)
+        .where(
+            DeviceMembership.device_id
+            == device_id,
+            DeviceMembership.role
+            == "member",
+        )
+    )
+
+    if member_count >= DEVICE_MEMBER_LIMIT:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Member limit reached",
+        )
+
+    membership = DeviceMembership(
+        user_id=member_user.id,
+        device_id=device_id,
+        role="member",
+    )
+
+    db.add(
+        membership
+    )
+
+    db.commit()
+
+    return DeviceMemberPublic(
+        user_id=member_user.id,
+        email=member_user.email,
+        role="member",
+    )
+
+
+@router.delete(
+    "/{device_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_device_member(
+    device_id: int,
+    user_id: int,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    _require_owner(
+        device_id,
+        current_user,
+        db,
+        lock_device=True,
+    )
+
+    membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id
+            == device_id,
+            DeviceMembership.user_id
+            == user_id,
+            DeviceMembership.role
+            == "member",
+        )
+    )
+
+    if membership is None:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member not found",
+        )
+
+    db.delete(
+        membership
+    )
+
+    db.commit()
+
+    return None
+
+
+@router.get(
+    "/{device_id}/events",
+    response_model=list[DeviceEventPublic],
+)
+def list_device_events(
+    device_id: int,
+
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=200,
+        ),
+    ] = 100,
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+
+    db: Session = Depends(
+        get_db
+    ),
+):
+    membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id
+            == device_id,
+
+            DeviceMembership.user_id
+            == current_user.id,
+        )
+    )
+
+    if membership is None:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+            ),
+            detail="Device not found",
+        )
+
+    events = db.scalars(
+        select(DeviceEvent)
+        .where(
+            DeviceEvent.device_id
+            == device_id
+        )
+        .order_by(
+            DeviceEvent.created_at.desc(),
+            DeviceEvent.id.desc(),
+        )
+        .limit(limit)
+    ).all()
+
+    return list(events)
 
 
 @router.get(

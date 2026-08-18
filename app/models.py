@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     Date,
@@ -71,6 +72,171 @@ class User(Base):
         passive_deletes=True,
     )
 
+    email_verification: Mapped[
+        "EmailVerification"
+    ] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+
+    auth_sessions: Mapped[
+        list["AuthSession"]
+    ] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class EmailVerification(Base):
+    __tablename__ = "email_verifications"
+
+    __table_args__ = (
+        CheckConstraint(
+            "failed_attempts >= 0",
+            name=(
+                "ck_email_verifications_"
+                "failed_attempts_nonnegative"
+            ),
+        ),
+        CheckConstraint(
+            "send_count >= 0",
+            name=(
+                "ck_email_verifications_"
+                "send_count_nonnegative"
+            ),
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+
+    code_digest: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+
+    failed_window_started_at: Mapped[
+        datetime | None
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    locked_until: Mapped[
+        datetime | None
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    send_window_started_at: Mapped[
+        datetime
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    send_count: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="email_verification",
+    )
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="CASCADE",
+        ),
+        index=True,
+        nullable=False,
+    )
+
+    refresh_token_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    revoked_at: Mapped[
+        datetime | None
+    ] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="auth_sessions",
+    )
+
 
 class Device(Base):
     __tablename__ = "devices"
@@ -123,6 +289,14 @@ class Device(Base):
     ] = relationship(
         back_populates="device",
         cascade="all, delete-orphan",
+    )
+
+    events: Mapped[
+        list["DeviceEvent"]
+    ] = relationship(
+        back_populates="device",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -462,4 +636,49 @@ class PowerDailySummary(Base):
 
     channel: Mapped["DeviceChannel"] = relationship(
         back_populates="daily_summaries",
+    )
+
+
+class DeviceEvent(Base):
+    __tablename__ = "device_events"
+
+    __table_args__ = (
+        Index(
+            "ix_device_events_device_created_at",
+            "device_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "devices.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    data: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    device: Mapped["Device"] = relationship(
+        back_populates="events",
     )

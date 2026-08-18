@@ -18,6 +18,9 @@ from app.mqtt_client import (
     DeviceUnavailableError,
     mqtt_manager,
 )
+from app.rate_limit import (
+    enforce_command_rate_limit,
+)
 from app.schemas import DeviceCommandResponse
 
 
@@ -38,6 +41,10 @@ def ping_device(
     ),
     db: Session = Depends(get_db),
 ):
+    enforce_command_rate_limit(
+        current_user.id
+    )
+
     row = db.execute(
         select(
             Device,

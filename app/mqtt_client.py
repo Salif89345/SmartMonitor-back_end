@@ -1,16 +1,24 @@
 import json
 import math
-import os
 import threading
 import uuid
 
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
 from sqlalchemy import select
 
 from app.database import SessionLocal
+from app.device_events import create_device_event_by_mqtt_id
+from app.settings import (
+    MQTT_CLIENT_ID,
+    MQTT_HOST,
+    MQTT_KEEPALIVE,
+    MQTT_PASSWORD,
+    MQTT_PORT,
+    MQTT_USERNAME,
+    POWER_HISTORY_INTERVAL_SECONDS,
+)
 from app.models import (
     Device,
     DeviceChannel,
@@ -22,48 +30,6 @@ from app.power_daily_summary import (
 )
 from app.data_retention import (
     cleanup_channel_history,
-)
-
-
-load_dotenv()
-
-MQTT_HOST = os.getenv(
-    "MQTT_HOST",
-    "127.0.0.1",
-)
-
-MQTT_PORT = int(
-    os.getenv(
-        "MQTT_PORT",
-        "1883",
-    )
-)
-
-MQTT_USERNAME = os.getenv(
-    "MQTT_USERNAME"
-)
-
-MQTT_PASSWORD = os.getenv(
-    "MQTT_PASSWORD"
-)
-
-MQTT_CLIENT_ID = os.getenv(
-    "MQTT_CLIENT_ID",
-    "smartmonitor-backend-v1",
-)
-
-MQTT_KEEPALIVE = int(
-    os.getenv(
-        "MQTT_KEEPALIVE",
-        "30",
-    )
-)
-
-POWER_HISTORY_INTERVAL_SECONDS = int(
-    os.getenv(
-        "POWER_HISTORY_INTERVAL_SECONDS",
-        "60",
-    )
 )
 
 MQTT_SUBSCRIPTIONS = (
@@ -403,6 +369,12 @@ class MqttManager:
             return
 
         with self._device_status_lock:
+            previous_status = (
+                self._device_statuses.get(
+                    mqtt_device_id
+                )
+            )
+
             self._device_statuses[
                 mqtt_device_id
             ] = device_status
@@ -413,6 +385,89 @@ class MqttManager:
             "| status:",
             device_status,
         )
+
+        # Le premier status re?u apr?s une
+        # connexion/reconnexion backend sert
+        # uniquement ? reconstruire l'?tat
+        # temps r?el. Il peut provenir d'un
+        # message MQTT retained et ne doit
+        # donc pas cr?er un faux ?v?nement.
+        if previous_status is None:
+            return
+
+        if previous_status == device_status:
+            return
+
+        self._persist_device_event(
+            mqtt_device_id=mqtt_device_id,
+            event_type=(
+                "device_online"
+                if device_status == "online"
+                else "device_offline"
+            ),
+        )
+
+    def _persist_device_event(
+        self,
+        *,
+        mqtt_device_id: str,
+        event_type: str,
+        data: dict | None = None,
+    ) -> None:
+        db = SessionLocal()
+
+        try:
+            event = (
+                create_device_event_by_mqtt_id(
+                    db,
+                    mqtt_device_id=(
+                        mqtt_device_id
+                    ),
+                    event_type=event_type,
+                    data=data,
+                )
+            )
+
+            if event is None:
+                db.rollback()
+
+                print(
+                    "[EVENT] Device ignored:"
+                    " unknown MQTT id",
+                    "| device:",
+                    mqtt_device_id,
+                    "| type:",
+                    event_type,
+                )
+
+                return
+
+            db.commit()
+
+            print(
+                "[EVENT] Device event stored:",
+                "| device:",
+                mqtt_device_id,
+                "| type:",
+                event_type,
+            )
+
+        except Exception as exc:
+            db.rollback()
+
+            print(
+                "[EVENT] Persistence failed:",
+                "| device:",
+                mqtt_device_id,
+                "| type:",
+                event_type,
+                "| error:",
+                type(exc).__name__,
+            )
+
+        finally:
+            db.close()
+
 
     def get_device_status(
         self,
@@ -1262,6 +1317,37 @@ class MqttManager:
                 raise ValueError(
                     "Invalid response message"
                 )
+
+            response_result = (
+                response["result"]
+            )
+
+            event_data = {
+                "request_id": request_id,
+                "command": command,
+            }
+
+            error_code = response.get(
+                "error_code"
+            )
+
+            if isinstance(
+                error_code,
+                str,
+            ):
+                event_data[
+                    "error_code"
+                ] = error_code
+
+            self._persist_device_event(
+                mqtt_device_id=mqtt_device_id,
+                event_type=(
+                    "command_ack"
+                    if response_result == "ack"
+                    else "command_nack"
+                ),
+                data=event_data,
+            )
 
             return response
 
