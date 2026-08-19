@@ -95,6 +95,67 @@ class DeviceAccessPublic(BaseModel):
     ]
 
 
+class DeviceListPublic(DeviceAccessPublic):
+    availability: Literal[
+        "online",
+        "offline",
+        "unknown",
+    ]
+
+    last_state_received_at: datetime | None
+
+
+class DeviceChannelPublic(BaseModel):
+    id: int
+    channel_key: str
+    name: str | None
+    is_enabled: bool
+
+
+class DeviceTelemetryPublic(BaseModel):
+    source: Literal[
+        "mqtt",
+        "persisted",
+    ]
+
+    freshness: Literal[
+        "fresh",
+        "stale",
+    ]
+
+    received_at: datetime
+    measured_at: datetime | None
+    age_seconds: float
+
+    model: str | None = None
+    hardware_revision: str | None = None
+    firmware_version: str | None = None
+
+    ntp_synchronized: bool | None = None
+
+    sensor_status: str | None = None
+    energy_status: str | None = None
+
+    temperature_c: float | None = None
+    humidity_pct: float | None = None
+
+    voltage_v: float | None = None
+    current_a: float | None = None
+    power_w: float | None = None
+    energy_kwh: float | None = None
+    frequency_hz: float | None = None
+    power_factor: float | None = None
+
+
+class DeviceDetailPublic(DeviceListPublic):
+    channels: list[DeviceChannelPublic]
+
+    telemetry_channel_id: int | None
+    telemetry: DeviceTelemetryPublic | None
+
+
+
+
 class DeviceClaimRequest(BaseModel):
     device_uid: str = Field(
         min_length=15,

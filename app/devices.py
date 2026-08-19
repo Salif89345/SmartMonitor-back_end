@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 from fastapi import (
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.device_live_state import live_state_store
 from app.history_service import (
     DETAILED_HISTORY_MAX_DAYS,
     HISTORY_MAX_DAYS,
@@ -29,11 +30,16 @@ from app.models import (
     DeviceChannel,
     DeviceEvent,
     DeviceMembership,
+    PowerMeasurement,
     User,
 )
 from app.schemas import (
     AddDeviceMemberRequest,
     DeviceAccessPublic,
+    DeviceChannelPublic,
+    DeviceDetailPublic,
+    DeviceListPublic,
+    DeviceTelemetryPublic,
     DeviceClaimRequest,
     DeviceEventPublic,
     DeviceHistoryResponse,
@@ -47,10 +53,97 @@ router = APIRouter(
 )
 
 
+POWER_TELEMETRY_CHANNEL_KEY = "power_1"
+
+LIVE_STATE_FRESH_SECONDS = 10.0
+
+
+def _device_availability(
+    device: Device,
+) -> str:
+    if not device.mqtt_device_id:
+        return "unknown"
+
+    device_status = (
+        mqtt_manager.get_device_status(
+            device.mqtt_device_id
+        )
+    )
+
+    if device_status in (
+        "online",
+        "offline",
+    ):
+        return device_status
+
+    return "unknown"
+
+
+def _live_state_for_device(
+    device: Device,
+) -> dict | None:
+    if not device.mqtt_device_id:
+        return None
+
+    return live_state_store.get(
+        device.mqtt_device_id
+    )
+
+
+def _snapshot_received_at(
+    snapshot: dict | None,
+) -> datetime | None:
+    if snapshot is None:
+        return None
+
+    received_at = snapshot.get(
+        "received_at"
+    )
+
+    if not isinstance(
+        received_at,
+        datetime,
+    ):
+        return None
+
+    return received_at
+
+
+def _age_seconds(
+    received_at: datetime,
+) -> float:
+    normalized = received_at
+
+    if normalized.tzinfo is None:
+        normalized = normalized.replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        normalized = normalized.astimezone(
+            timezone.utc
+        )
+
+    age = (
+        datetime.now(timezone.utc)
+        - normalized
+    ).total_seconds()
+
+    return max(
+        0.0,
+        age,
+    )
+
+
 def build_device_response(
     device: Device,
     role: str,
 ) -> DeviceAccessPublic:
+    """
+    Contrat historique minimal.
+
+    Utilise notamment par les flux qui ne doivent
+    pas dependre du Dashboard SM-071-3.
+    """
     return DeviceAccessPublic(
         id=device.id,
         device_uid=device.device_uid,
@@ -61,10 +154,287 @@ def build_device_response(
     )
 
 
+def build_device_list_response(
+    device: Device,
+    role: str,
+) -> DeviceListPublic:
+    snapshot = _live_state_for_device(
+        device
+    )
+
+    return DeviceListPublic(
+        id=device.id,
+        device_uid=device.device_uid,
+        name=device.name,
+        is_active=device.is_active,
+        created_at=device.created_at,
+        role=role,
+
+        availability=(
+            _device_availability(
+                device
+            )
+        ),
+
+        last_state_received_at=(
+            _snapshot_received_at(
+                snapshot
+            )
+        ),
+    )
+
+
+def _build_live_telemetry(
+    device: Device,
+) -> DeviceTelemetryPublic | None:
+    snapshot = _live_state_for_device(
+        device
+    )
+
+    received_at = _snapshot_received_at(
+        snapshot
+    )
+
+    if (
+        snapshot is None
+        or received_at is None
+    ):
+        return None
+
+    age_seconds = _age_seconds(
+        received_at
+    )
+
+    freshness = (
+        "fresh"
+        if age_seconds
+        <= LIVE_STATE_FRESH_SECONDS
+        else "stale"
+    )
+
+    return DeviceTelemetryPublic(
+        source="mqtt",
+        freshness=freshness,
+
+        received_at=received_at,
+        measured_at=snapshot.get(
+            "measured_at"
+        ),
+        age_seconds=age_seconds,
+
+        model=snapshot.get(
+            "model"
+        ),
+        hardware_revision=snapshot.get(
+            "hardware_revision"
+        ),
+        firmware_version=snapshot.get(
+            "firmware_version"
+        ),
+
+        ntp_synchronized=snapshot.get(
+            "ntp_synchronized"
+        ),
+
+        sensor_status=snapshot.get(
+            "sensor_status"
+        ),
+        energy_status=snapshot.get(
+            "energy_status"
+        ),
+
+        temperature_c=snapshot.get(
+            "temperature_c"
+        ),
+        humidity_pct=snapshot.get(
+            "humidity_pct"
+        ),
+
+        voltage_v=snapshot.get(
+            "voltage_v"
+        ),
+        current_a=snapshot.get(
+            "current_a"
+        ),
+        power_w=snapshot.get(
+            "power_w"
+        ),
+        energy_kwh=snapshot.get(
+            "energy_kwh"
+        ),
+        frequency_hz=snapshot.get(
+            "frequency_hz"
+        ),
+        power_factor=snapshot.get(
+            "power_factor"
+        ),
+    )
+
+
+def _build_persisted_telemetry(
+    db: Session,
+    channel: DeviceChannel,
+) -> DeviceTelemetryPublic | None:
+    measurement = db.scalar(
+        select(
+            PowerMeasurement
+        )
+        .where(
+            PowerMeasurement.channel_id
+            == channel.id
+        )
+        .order_by(
+            PowerMeasurement.measured_at.desc(),
+            PowerMeasurement.id.desc(),
+        )
+        .limit(1)
+    )
+
+    if measurement is None:
+        return None
+
+    return DeviceTelemetryPublic(
+        source="persisted",
+        freshness="stale",
+
+        received_at=(
+            measurement.received_at
+        ),
+        measured_at=(
+            measurement.measured_at
+        ),
+        age_seconds=(
+            _age_seconds(
+                measurement.received_at
+            )
+        ),
+
+        voltage_v=(
+            measurement.voltage_v
+        ),
+        current_a=(
+            measurement.current_a
+        ),
+        power_w=(
+            measurement.power_w
+        ),
+        energy_kwh=(
+            measurement.energy_kwh
+        ),
+        frequency_hz=(
+            measurement.frequency_hz
+        ),
+        power_factor=(
+            measurement.power_factor
+        ),
+    )
+
+
+def build_device_detail_response(
+    device: Device,
+    role: str,
+    db: Session,
+) -> DeviceDetailPublic:
+    channels = list(
+        db.scalars(
+            select(
+                DeviceChannel
+            )
+            .where(
+                DeviceChannel.device_id
+                == device.id
+            )
+            .order_by(
+                DeviceChannel.id
+            )
+        ).all()
+    )
+
+    telemetry_channel = next(
+        (
+            channel
+            for channel in channels
+            if (
+                channel.channel_key
+                == POWER_TELEMETRY_CHANNEL_KEY
+            )
+        ),
+        None,
+    )
+
+    snapshot = _live_state_for_device(
+        device
+    )
+
+    last_state_received_at = (
+        _snapshot_received_at(
+            snapshot
+        )
+    )
+
+    telemetry = (
+        _build_live_telemetry(
+            device
+        )
+    )
+
+    if (
+        telemetry is None
+        and telemetry_channel is not None
+    ):
+        telemetry = (
+            _build_persisted_telemetry(
+                db,
+                telemetry_channel,
+            )
+        )
+
+    return DeviceDetailPublic(
+        id=device.id,
+        device_uid=device.device_uid,
+        name=device.name,
+        is_active=device.is_active,
+        created_at=device.created_at,
+        role=role,
+
+        availability=(
+            _device_availability(
+                device
+            )
+        ),
+
+        last_state_received_at=(
+            last_state_received_at
+        ),
+
+        channels=[
+            DeviceChannelPublic(
+                id=channel.id,
+                channel_key=(
+                    channel.channel_key
+                ),
+                name=channel.name,
+                is_enabled=(
+                    channel.is_enabled
+                ),
+            )
+            for channel in channels
+        ],
+
+        telemetry_channel_id=(
+            telemetry_channel.id
+            if telemetry_channel is not None
+            else None
+        ),
+
+        telemetry=telemetry,
+    )
+
+
 @router.get(
     "",
     response_model=list[
-        DeviceAccessPublic
+        DeviceListPublic
     ],
 )
 def list_my_devices(
@@ -95,7 +465,7 @@ def list_my_devices(
     ).all()
 
     return [
-        build_device_response(
+        build_device_list_response(
             device,
             role,
         )
@@ -344,7 +714,7 @@ def claim_device(
 
 @router.get(
     "/{device_id}",
-    response_model=DeviceAccessPublic,
+    response_model=DeviceDetailPublic,
 )
 def get_my_device(
     device_id: int,
@@ -382,9 +752,10 @@ def get_my_device(
 
     device, role = row
 
-    return build_device_response(
+    return build_device_detail_response(
         device,
         role,
+        db,
     )
 
 

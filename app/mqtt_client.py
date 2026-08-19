@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.device_events import create_device_event_by_mqtt_id
+from app.device_live_state import live_state_store
 from app.settings import (
     MQTT_CLIENT_ID,
     MQTT_HOST,
@@ -992,6 +993,11 @@ class MqttManager:
 
             return
 
+
+        live_state_store.update(
+            mqtt_device_id=mqtt_device_id,
+            payload=payload,
+        )
         system = payload.get(
             "system"
         )
