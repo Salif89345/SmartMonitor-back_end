@@ -9,6 +9,7 @@ from fastapi import (
     status,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -22,6 +23,7 @@ from app.history_service import (
     build_daily_history,
     build_detailed_history,
 )
+from app.mqtt_client import mqtt_manager
 from app.models import (
     Device,
     DeviceChannel,
@@ -32,6 +34,7 @@ from app.models import (
 from app.schemas import (
     AddDeviceMemberRequest,
     DeviceAccessPublic,
+    DeviceClaimRequest,
     DeviceEventPublic,
     DeviceHistoryResponse,
     DeviceMemberPublic,
@@ -98,6 +101,245 @@ def list_my_devices(
         )
         for device, role in rows
     ]
+
+
+@router.post(
+    "/claim",
+    response_model=DeviceAccessPublic,
+)
+def claim_device(
+    payload: DeviceClaimRequest,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(
+        get_db
+    ),
+):
+    claim_reservation = (
+        mqtt_manager.reserve_claim_proof(
+            device_uid=payload.device_uid,
+            nonce=payload.nonce,
+        )
+    )
+
+    if claim_reservation is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Device association proof "
+                "is invalid or expired"
+            ),
+        )
+
+    reservation_id, mqtt_device_id = (
+        claim_reservation
+    )
+
+    try:
+        device = db.scalar(
+            select(Device)
+            .where(
+                Device.device_uid
+                == payload.device_uid
+            )
+            .with_for_update()
+        )
+
+        if device is None:
+            mqtt_conflict = db.scalar(
+                select(Device).where(
+                    Device.mqtt_device_id
+                    == mqtt_device_id
+                )
+            )
+
+            if mqtt_conflict is not None:
+                raise HTTPException(
+                    status_code=(
+                        status.HTTP_409_CONFLICT
+                    ),
+                    detail=(
+                        "MQTT identity already "
+                        "belongs to another device"
+                    ),
+                )
+
+            device = Device(
+                device_uid=(
+                    payload.device_uid
+                ),
+                mqtt_device_id=(
+                    mqtt_device_id
+                ),
+            )
+
+            db.add(
+                device
+            )
+
+            db.flush()
+
+        else:
+            mqtt_conflict = db.scalar(
+                select(Device).where(
+                    Device.mqtt_device_id
+                    == mqtt_device_id,
+                    Device.id != device.id,
+                )
+            )
+
+            if mqtt_conflict is not None:
+                raise HTTPException(
+                    status_code=(
+                        status.HTTP_409_CONFLICT
+                    ),
+                    detail=(
+                        "MQTT identity already "
+                        "belongs to another device"
+                    ),
+                )
+
+            # device_uid reste l'identité matérielle.
+            # mqtt_device_id reste une identité de routage.
+            device.mqtt_device_id = (
+                mqtt_device_id
+            )
+
+        owner = db.scalar(
+            select(
+                DeviceMembership
+            ).where(
+                DeviceMembership.device_id
+                == device.id,
+
+                DeviceMembership.role
+                == "owner",
+            )
+        )
+
+        if (
+            owner is not None
+            and owner.user_id
+            != current_user.id
+        ):
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_409_CONFLICT
+                ),
+                detail=(
+                    "Device already has an owner"
+                ),
+            )
+
+        current_membership = db.scalar(
+            select(
+                DeviceMembership
+            ).where(
+                DeviceMembership.device_id
+                == device.id,
+
+                DeviceMembership.user_id
+                == current_user.id,
+            )
+        )
+
+        if current_membership is None:
+            db.add(
+                DeviceMembership(
+                    user_id=current_user.id,
+                    device_id=device.id,
+                    role="owner",
+                )
+            )
+
+        elif current_membership.role != "owner":
+            current_membership.role = (
+                "owner"
+            )
+
+        power_channel = db.scalar(
+            select(
+                DeviceChannel
+            ).where(
+                DeviceChannel.device_id
+                == device.id,
+
+                DeviceChannel.channel_key
+                == "power_1",
+            )
+        )
+
+        if power_channel is None:
+            db.add(
+                DeviceChannel(
+                    device_id=device.id,
+                    channel_key="power_1",
+                    name="Power",
+                    is_enabled=True,
+                )
+            )
+
+        db.commit()
+
+        proof_committed = (
+            mqtt_manager.commit_claim_proof(
+                device_uid=payload.device_uid,
+                reservation_id=reservation_id,
+            )
+        )
+
+        if not proof_committed:
+            raise RuntimeError(
+                "Claim proof reservation was lost "
+                "after database commit"
+            )
+
+        db.refresh(
+            device
+        )
+
+    except HTTPException:
+        db.rollback()
+
+        mqtt_manager.release_claim_proof(
+            device_uid=payload.device_uid,
+            reservation_id=reservation_id,
+        )
+
+        raise
+
+    except IntegrityError:
+        db.rollback()
+
+        mqtt_manager.release_claim_proof(
+            device_uid=payload.device_uid,
+            reservation_id=reservation_id,
+        )
+
+        raise HTTPException(
+            status_code=(
+                status.HTTP_409_CONFLICT
+            ),
+            detail=(
+                "Device association conflict"
+            ),
+        )
+
+    except Exception:
+        db.rollback()
+
+        mqtt_manager.release_claim_proof(
+            device_uid=payload.device_uid,
+            reservation_id=reservation_id,
+        )
+
+        raise
+
+    return build_device_response(
+        device,
+        "owner",
+    )
 
 
 @router.get(

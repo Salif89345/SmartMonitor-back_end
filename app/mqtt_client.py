@@ -1,6 +1,9 @@
+import hashlib
+import hmac
 import json
 import math
 import threading
+import time
 import uuid
 
 from datetime import datetime, timezone
@@ -36,7 +39,10 @@ MQTT_SUBSCRIPTIONS = (
     "smartmonitor/+/state",
     "smartmonitor/+/status",
     "smartmonitor/+/response",
+    "smartmonitor/provisioning/+/claim-proof",
 )
+
+CLAIM_PROOF_TTL_SECONDS = 120.0
 
 
 class DeviceUnavailableError(
@@ -75,6 +81,20 @@ class MqttManager:
         ] = {}
 
         self._daily_summary_checked_date = {}
+
+        self._claim_proof_lock = (
+            threading.Lock()
+        )
+
+        self._claim_proofs: dict[
+            str,
+            dict,
+        ] = {}
+
+        self._consumed_claim_proofs: dict[
+            tuple[str, str],
+            float,
+        ] = {}
 
         self.client = mqtt.Client(
             callback_api_version=
@@ -230,6 +250,20 @@ class MqttManager:
             len(message.payload),
         )
 
+        if (
+            message.topic.startswith(
+                "smartmonitor/provisioning/"
+            )
+            and message.topic.endswith(
+                "/claim-proof"
+            )
+        ):
+            self._handle_claim_proof_message(
+                message
+            )
+
+            return
+
         if message.topic.endswith(
             "/state"
         ):
@@ -306,6 +340,372 @@ class MqttManager:
             pending[
                 "event"
             ].set()
+
+    def _prune_claim_proofs(
+        self,
+        now: float,
+    ) -> None:
+        expired_device_uids = [
+            device_uid
+            for device_uid, proof
+            in self._claim_proofs.items()
+            if proof["expires_at"] <= now
+        ]
+
+        for device_uid in expired_device_uids:
+            self._claim_proofs.pop(
+                device_uid,
+                None,
+            )
+
+        expired_consumed_proofs = [
+            key
+            for key, expires_at
+            in self._consumed_claim_proofs.items()
+            if expires_at <= now
+        ]
+
+        for key in expired_consumed_proofs:
+            self._consumed_claim_proofs.pop(
+                key,
+                None,
+            )
+
+    def _handle_claim_proof_message(
+        self,
+        message,
+    ) -> None:
+        topic_parts = (
+            message.topic.split("/")
+        )
+
+        if (
+            len(topic_parts) != 4
+            or topic_parts[0] != "smartmonitor"
+            or topic_parts[1] != "provisioning"
+            or topic_parts[3] != "claim-proof"
+        ):
+            print(
+                "[MQTT] Invalid claim proof topic:",
+                message.topic,
+            )
+
+            return
+
+        topic_device_uid = topic_parts[2]
+
+        try:
+            payload = json.loads(
+                message.payload.decode(
+                    "utf-8"
+                )
+            )
+
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            print(
+                "[MQTT] Invalid claim proof payload:",
+                message.topic,
+            )
+
+            return
+
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            return
+
+        device_uid = payload.get(
+            "device_uid"
+        )
+
+        proof_sha256 = payload.get(
+            "proof_sha256"
+        )
+
+        mqtt_device_id = payload.get(
+            "mqtt_device_id"
+        )
+
+        if (
+            not isinstance(
+                device_uid,
+                str,
+            )
+            or len(device_uid) != 15
+            or not device_uid.startswith(
+                "SM-"
+            )
+            or any(
+                character
+                not in "0123456789ABCDEF"
+                for character
+                in device_uid[3:]
+            )
+            or device_uid
+            != topic_device_uid
+        ):
+            print(
+                "[MQTT] Invalid claim device UID:",
+                message.topic,
+            )
+
+            return
+
+        if (
+            not isinstance(
+                proof_sha256,
+                str,
+            )
+            or len(proof_sha256) != 64
+            or any(
+                character
+                not in "0123456789ABCDEF"
+                for character
+                in proof_sha256
+            )
+        ):
+            print(
+                "[MQTT] Invalid claim proof digest:",
+                device_uid,
+            )
+
+            return
+
+        if (
+            not isinstance(
+                mqtt_device_id,
+                str,
+            )
+            or not mqtt_device_id
+            or len(mqtt_device_id) > 31
+            or any(
+                character in "/+#"
+                for character
+                in mqtt_device_id
+            )
+        ):
+            print(
+                "[MQTT] Invalid claim MQTT identity:",
+                device_uid,
+            )
+
+            return
+
+        now = time.monotonic()
+
+        with self._claim_proof_lock:
+            self._prune_claim_proofs(
+                now
+            )
+
+            normalized_digest = (
+                proof_sha256.lower()
+            )
+
+            consumed_key = (
+                device_uid,
+                normalized_digest,
+            )
+
+            if consumed_key in (
+                self._consumed_claim_proofs
+            ):
+                return
+
+            existing_proof = (
+                self._claim_proofs.get(
+                    device_uid
+                )
+            )
+
+            if (
+                existing_proof is not None
+                and existing_proof.get(
+                    "reservation_id"
+                ) is not None
+                and existing_proof[
+                    "proof_sha256"
+                ] == normalized_digest
+            ):
+                return
+
+            self._claim_proofs[
+                device_uid
+            ] = {
+                "proof_sha256":
+                    normalized_digest,
+
+                "mqtt_device_id":
+                    mqtt_device_id,
+
+                "expires_at":
+                    now
+                    + CLAIM_PROOF_TTL_SECONDS,
+
+                "reservation_id": None,
+
+                "reservation_expires_at":
+                    0.0,
+            }
+
+        # Le nonce lui-même ne transite jamais
+        # par MQTT et n'est jamais journalisé.
+        print(
+            "[MQTT] Association proof registered:",
+            device_uid,
+        )
+
+    def reserve_claim_proof(
+        self,
+        *,
+        device_uid: str,
+        nonce: str,
+    ) -> tuple[str, str] | None:
+        if (
+            len(nonce) != 32
+            or any(
+                character
+                not in "0123456789ABCDEF"
+                for character
+                in nonce
+            )
+        ):
+            return None
+
+        calculated_sha256 = (
+            hashlib.sha256(
+                nonce.encode(
+                    "ascii"
+                )
+            )
+            .hexdigest()
+        )
+
+        now = time.monotonic()
+
+        with self._claim_proof_lock:
+            self._prune_claim_proofs(
+                now
+            )
+
+            proof = self._claim_proofs.get(
+                device_uid
+            )
+
+            if proof is None:
+                return None
+
+            if not hmac.compare_digest(
+                calculated_sha256,
+                proof["proof_sha256"],
+            ):
+                return None
+
+            reservation_id = proof.get(
+                "reservation_id"
+            )
+
+            reservation_expires_at = (
+                proof.get(
+                    "reservation_expires_at",
+                    0.0,
+                )
+            )
+
+            if (
+                reservation_id is not None
+                and reservation_expires_at > now
+            ):
+                return None
+
+            reservation_id = str(
+                uuid.uuid4()
+            )
+
+            proof["reservation_id"] = (
+                reservation_id
+            )
+
+            proof[
+                "reservation_expires_at"
+            ] = proof["expires_at"]
+
+            mqtt_device_id = proof[
+                "mqtt_device_id"
+            ]
+
+        return (
+            reservation_id,
+            mqtt_device_id,
+        )
+
+    def release_claim_proof(
+        self,
+        *,
+        device_uid: str,
+        reservation_id: str,
+    ) -> None:
+        with self._claim_proof_lock:
+            proof = self._claim_proofs.get(
+                device_uid
+            )
+
+            if (
+                proof is None
+                or proof.get("reservation_id")
+                != reservation_id
+            ):
+                return
+
+            proof["reservation_id"] = None
+            proof[
+                "reservation_expires_at"
+            ] = 0.0
+
+    def commit_claim_proof(
+        self,
+        *,
+        device_uid: str,
+        reservation_id: str,
+    ) -> bool:
+        now = time.monotonic()
+
+        with self._claim_proof_lock:
+            self._prune_claim_proofs(
+                now
+            )
+
+            proof = self._claim_proofs.get(
+                device_uid
+            )
+
+            if (
+                proof is None
+                or proof.get("reservation_id")
+                != reservation_id
+            ):
+                return False
+
+            digest = proof["proof_sha256"]
+
+            self._claim_proofs.pop(
+                device_uid,
+                None,
+            )
+
+            self._consumed_claim_proofs[
+                (device_uid, digest)
+            ] = (
+                now
+                + CLAIM_PROOF_TTL_SECONDS
+            )
+
+        return True
+
 
     def _handle_status_message(
         self,

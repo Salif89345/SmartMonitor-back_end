@@ -95,6 +95,20 @@ class DeviceAccessPublic(BaseModel):
     ]
 
 
+class DeviceClaimRequest(BaseModel):
+    device_uid: str = Field(
+        min_length=15,
+        max_length=15,
+        pattern=r"^SM-[0-9A-F]{12}$",
+    )
+
+    nonce: str = Field(
+        min_length=32,
+        max_length=32,
+        pattern=r"^[0-9A-F]{32}$",
+    )
+
+
 class AddDeviceMemberRequest(BaseModel):
     email: EmailStr
 
