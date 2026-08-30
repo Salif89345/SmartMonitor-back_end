@@ -42,6 +42,57 @@ class DeviceLiveStateStore:
 
         return normalized or None
 
+    @staticmethod
+    def _measurement_quality(value) -> str | None:
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+
+        if normalized not in {
+            "ok",
+            "incoherent",
+            "unavailable",
+        }:
+            return None
+
+        return normalized
+
+    @staticmethod
+    def _measurement_freshness(value) -> str | None:
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+
+        if normalized not in {
+            "unknown",
+            "fresh",
+            "stale",
+        }:
+            return None
+
+        return normalized
+
+    @staticmethod
+    def _non_negative_int(value) -> int | None:
+        if isinstance(value, bool):
+            return None
+
+        if not isinstance(value, (int, float)):
+            return None
+
+        numeric_value = float(value)
+
+        if (
+            not math.isfinite(numeric_value)
+            or numeric_value < 0
+            or not numeric_value.is_integer()
+        ):
+            return None
+
+        return int(numeric_value)
+
     def update(
         self,
         *,
@@ -120,30 +171,68 @@ class DeviceLiveStateStore:
                 energy_manager.get("status")
             ),
 
+            "sensor_freshness": self._measurement_freshness(
+                environment.get("freshness")
+            ),
+            "sensor_age_ms": self._non_negative_int(
+                environment.get("age_ms")
+            ),
+
+            "energy_freshness": self._measurement_freshness(
+                energy.get("freshness")
+            ),
+            "energy_age_ms": self._non_negative_int(
+                energy.get("age_ms")
+            ),
+
             "temperature_c": self._finite_float(
                 environment.get("temperature_c")
             ),
+            "temperature_quality": self._measurement_quality(
+                environment.get("temperature_quality")
+            ),
             "humidity_pct": self._finite_float(
                 environment.get("humidity_pct")
+            ),
+            "humidity_quality": self._measurement_quality(
+                environment.get("humidity_quality")
             ),
 
             "voltage_v": self._finite_float(
                 energy.get("voltage_v")
             ),
+            "voltage_quality": self._measurement_quality(
+                energy.get("voltage_quality")
+            ),
             "current_a": self._finite_float(
                 energy.get("current_a")
+            ),
+            "current_quality": self._measurement_quality(
+                energy.get("current_quality")
             ),
             "power_w": self._finite_float(
                 energy.get("power_w")
             ),
+            "power_quality": self._measurement_quality(
+                energy.get("power_quality")
+            ),
             "energy_kwh": self._finite_float(
                 energy.get("energy_kwh")
+            ),
+            "energy_quality": self._measurement_quality(
+                energy.get("energy_quality")
             ),
             "frequency_hz": self._finite_float(
                 energy.get("frequency_hz")
             ),
+            "frequency_quality": self._measurement_quality(
+                energy.get("frequency_quality")
+            ),
             "power_factor": self._finite_float(
                 energy.get("power_factor")
+            ),
+            "power_factor_quality": self._measurement_quality(
+                energy.get("power_factor_quality")
             ),
         }
 

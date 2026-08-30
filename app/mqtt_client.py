@@ -15,11 +15,13 @@ from app.database import SessionLocal
 from app.device_events import create_device_event_by_mqtt_id
 from app.device_live_state import live_state_store
 from app.settings import (
+    MQTT_CA_CERT_PATH,
     MQTT_CLIENT_ID,
     MQTT_HOST,
     MQTT_KEEPALIVE,
     MQTT_PASSWORD,
     MQTT_PORT,
+    MQTT_TLS_ENABLED,
     MQTT_USERNAME,
     POWER_HISTORY_INTERVAL_SECONDS,
 )
@@ -108,6 +110,11 @@ class MqttManager:
             self.client.username_pw_set(
                 MQTT_USERNAME,
                 MQTT_PASSWORD,
+            )
+
+        if MQTT_TLS_ENABLED:
+            self.client.tls_set(
+                ca_certs=MQTT_CA_CERT_PATH,
             )
 
         self.client.reconnect_delay_set(
@@ -1115,15 +1122,12 @@ class MqttManager:
 
         if energy_status != "OK":
             print(
-                "[MQTT] State skipped:"
-                " energy manager not OK",
+                "[MQTT] State received with degraded energy manager",
                 "| device:",
                 mqtt_device_id,
                 "| status:",
                 energy_status,
             )
-
-            return
 
         energy = payload.get(
             "energy"
@@ -1552,9 +1556,16 @@ class MqttManager:
         )
 
     def start(self):
+        transport = (
+            "TLS"
+            if MQTT_TLS_ENABLED
+            else "plain"
+        )
+
         print(
             f"[MQTT] Connecting to "
-            f"{MQTT_HOST}:{MQTT_PORT}"
+            f"{MQTT_HOST}:{MQTT_PORT} "
+            f"| transport: {transport}"
         )
 
         self.client.connect_async(
@@ -1782,6 +1793,9 @@ class MqttManager:
 
                 "port":
                     MQTT_PORT,
+
+                "tls_enabled":
+                    MQTT_TLS_ENABLED,
 
                 "client_id":
                     MQTT_CLIENT_ID,

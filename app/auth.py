@@ -609,7 +609,6 @@ def resend_verification(
         "message": GENERIC_RESEND_MESSAGE,
     }
 
-
 @router.post(
     "/login",
     response_model=LoginResponse,
@@ -619,6 +618,11 @@ def login(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    logger.info(
+        "LOGIN REQUEST PAYLOAD: email=%s",
+        payload.email,
+    )
+
     enforce_login_rate_limit(
         request
     )
@@ -675,6 +679,7 @@ def login(
         "token_type": "bearer",
         "user": user,
     }
+
 
 
 @router.post(

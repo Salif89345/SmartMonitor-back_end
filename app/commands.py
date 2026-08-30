@@ -30,17 +30,13 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "/{device_id}/commands/ping",
-    response_model=DeviceCommandResponse,
-)
-def ping_device(
+def _send_owner_command(
     device_id: int,
-    current_user: User = Depends(
-        get_current_user
-    ),
-    db: Session = Depends(get_db),
-):
+    command: str,
+    current_user: User,
+    db: Session,
+) -> DeviceCommandResponse:
+    """Send one read-only diagnostic command on behalf of a device owner."""
     enforce_command_rate_limit(
         current_user.id
     )
@@ -92,7 +88,7 @@ def ping_device(
         response = mqtt_manager.send_command(
             mqtt_device_id=
                 device.mqtt_device_id,
-            command="ping",
+            command=command,
             parameters={},
             timeout=5.0,
         )
@@ -134,4 +130,42 @@ def ping_device(
         ),
         message=response["message"],
         data=response.get("data"),
+    )
+
+
+@router.post(
+    "/{device_id}/commands/ping",
+    response_model=DeviceCommandResponse,
+)
+def ping_device(
+    device_id: int,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+    return _send_owner_command(
+        device_id=device_id,
+        command="ping",
+        current_user=current_user,
+        db=db,
+    )
+
+
+@router.post(
+    "/{device_id}/commands/get_status",
+    response_model=DeviceCommandResponse,
+)
+def get_status_device(
+    device_id: int,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+    return _send_owner_command(
+        device_id=device_id,
+        command="get_status",
+        current_user=current_user,
+        db=db,
     )

@@ -16,6 +16,28 @@ def _split_csv(
     ]
 
 
+def _parse_bool(
+    name: str,
+    default: bool = False,
+) -> bool:
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return default
+
+    normalized_value = raw_value.strip().lower()
+
+    if normalized_value in ("1", "true", "yes", "on"):
+        return True
+
+    if normalized_value in ("0", "false", "no", "off"):
+        return False
+
+    raise RuntimeError(
+        f"{name} must be a boolean value"
+    )
+
+
 APP_ENV = os.getenv(
     "APP_ENV",
     "dev",
@@ -71,6 +93,21 @@ MQTT_KEEPALIVE = int(
         "30",
     )
 )
+
+MQTT_TLS_ENABLED = _parse_bool(
+    "MQTT_TLS_ENABLED",
+    False,
+)
+
+MQTT_CA_CERT_PATH = os.getenv(
+    "MQTT_CA_CERT_PATH"
+)
+
+if MQTT_TLS_ENABLED and not MQTT_CA_CERT_PATH:
+    raise RuntimeError(
+        "MQTT_CA_CERT_PATH is required "
+        "when MQTT_TLS_ENABLED is true"
+    )
 
 POWER_HISTORY_INTERVAL_SECONDS = int(
     os.getenv(

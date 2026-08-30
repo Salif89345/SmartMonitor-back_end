@@ -243,30 +243,74 @@ def _build_live_telemetry(
             "energy_status"
         ),
 
+        sensor_freshness=snapshot.get(
+            "sensor_freshness"
+        ),
+        sensor_age_ms=snapshot.get(
+            "sensor_age_ms"
+        ),
+
+        energy_freshness=snapshot.get(
+            "energy_freshness"
+        ),
+        energy_age_ms=snapshot.get(
+            "energy_age_ms"
+        ),
+
         temperature_c=snapshot.get(
             "temperature_c"
         ),
+        temperature_quality=snapshot.get(
+            "temperature_quality"
+        ),
+
         humidity_pct=snapshot.get(
             "humidity_pct"
+        ),
+        humidity_quality=snapshot.get(
+            "humidity_quality"
         ),
 
         voltage_v=snapshot.get(
             "voltage_v"
         ),
+        voltage_quality=snapshot.get(
+            "voltage_quality"
+        ),
+
         current_a=snapshot.get(
             "current_a"
         ),
+        current_quality=snapshot.get(
+            "current_quality"
+        ),
+
         power_w=snapshot.get(
             "power_w"
         ),
+        power_quality=snapshot.get(
+            "power_quality"
+        ),
+
         energy_kwh=snapshot.get(
             "energy_kwh"
         ),
+        energy_quality=snapshot.get(
+            "energy_quality"
+        ),
+
         frequency_hz=snapshot.get(
             "frequency_hz"
         ),
+        frequency_quality=snapshot.get(
+            "frequency_quality"
+        ),
+
         power_factor=snapshot.get(
             "power_factor"
+        ),
+        power_factor_quality=snapshot.get(
+            "power_factor_quality"
         ),
     )
 
