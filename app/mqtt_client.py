@@ -41,6 +41,7 @@ from app.data_retention import (
 MQTT_SUBSCRIPTIONS = (
     "smartmonitor/+/state",
     "smartmonitor/+/status",
+    "smartmonitor/+/outage",
     "smartmonitor/+/response",
     "smartmonitor/provisioning/+/claim-proof",
 )
