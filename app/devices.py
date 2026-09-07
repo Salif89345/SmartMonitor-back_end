@@ -222,6 +222,16 @@ def _build_live_telemetry(
         ),
         age_seconds=age_seconds,
 
+        device_uid=snapshot.get(
+            "device_uid"
+        ),
+        mqtt_device_id=snapshot.get(
+            "mqtt_device_id"
+        ),
+        capabilities=snapshot.get(
+            "capabilities"
+        ),
+
         model=snapshot.get(
             "model"
         ),

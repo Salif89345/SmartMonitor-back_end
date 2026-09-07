@@ -141,9 +141,12 @@ class DeviceTelemetryPublic(BaseModel):
     measured_at: datetime | None
     age_seconds: float
 
+    device_uid: str | None = None
+    mqtt_device_id: str | None = None
     model: str | None = None
     hardware_revision: str | None = None
     firmware_version: str | None = None
+    capabilities: dict[str, Any] | None = None
 
     ntp_synchronized: bool | None = None
 

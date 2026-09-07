@@ -154,12 +154,19 @@ class DeviceLiveStateStore:
             "received_at": received_at,
             "measured_at": measured_at,
 
+            "device_uid": self._text(payload.get("device_uid")),
+            "mqtt_device_id": self._text(payload.get("mqtt_device_id")),
             "model": self._text(payload.get("model")),
             "hardware_revision": self._text(
                 payload.get("hardware_revision")
             ),
             "firmware_version": self._text(
                 payload.get("firmware_version")
+            ),
+            "capabilities": (
+                payload.get("capabilities")
+                if isinstance(payload.get("capabilities"), dict)
+                else None
             ),
 
             "ntp_synchronized": ntp_synchronized,
