@@ -3,3 +3,17 @@
 __pycache__/
 *.pyc
 mdp_tests.md
+
+# OP-020 - hygiene des archives et secrets
+.env
+.env.*
+!.env.example
+**/Secrets.h
+*.bak
+*.log
+*.key
+*.p12
+*.pfx
+
+# Outil ponctuel de verification locale
+/verify_op005.py

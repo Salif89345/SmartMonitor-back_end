@@ -6,35 +6,21 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models import PowerDailySummary, PowerMeasurement
-
-
-HISTORY_RESOLUTION_SECONDS = (
-    60,
-    120,
-    300,
-    600,
-    900,
-    1800,
-    3600,
-    7200,
-    10800,
-    21600,
-    43200,
-    86400,
+from app.measurement_contract import (
+    DAILY_RESOLUTION_DAYS,
+    DETAILED_HISTORY_MAX_DAYS,
+    HISTORY_MAX_DAYS,
+    HISTORY_RESOLUTION_SECONDS,
+    HISTORY_TARGET_POINTS_DEFAULT,
+    HISTORY_TARGET_POINTS_MAX,
+    HISTORY_TARGET_POINTS_MIN,
+    HISTORY_TIMEZONE_NAME,
 )
 
-DAILY_RESOLUTION_DAYS = (
-    1,
+
+HISTORY_TIMEZONE = ZoneInfo(
+    HISTORY_TIMEZONE_NAME
 )
-
-HISTORY_TARGET_POINTS_MIN = 60
-HISTORY_TARGET_POINTS_DEFAULT = 90
-HISTORY_TARGET_POINTS_MAX = 120
-
-DETAILED_HISTORY_MAX_DAYS = 90
-HISTORY_MAX_DAYS = 365
-
-HISTORY_TIMEZONE = ZoneInfo("Europe/Paris")
 
 
 def choose_history_resolution_seconds(

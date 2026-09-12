@@ -1,0 +1,2 @@
+logged_at_utc,received_at_utc,mqtt_device_id,topic,boot_count,reset_reason,rssi_dbm,free_heap_bytes,min_free_heap_bytes,largest_free_block_bytes,fragmentation_pct,free_drop_pct,min_drop_pct,largest_drop_pct,alert
+2026-09-08T22:33:14.827660+00:00,2026-09-08T22:33:07.119208+00:00,atelier,smartmonitor/atelier/state,36,POWER_ON,-53,71432,56408,53236,25.47,0.0,0.0,0.0,OK

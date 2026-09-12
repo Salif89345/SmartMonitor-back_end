@@ -421,6 +421,14 @@ class PowerMeasurement(Base):
     __tablename__ = "power_measurements"
 
     __table_args__ = (
+        UniqueConstraint(
+            "channel_id",
+            "measured_at",
+            name=(
+                "uq_power_measurements_"
+                "channel_measured_at"
+            ),
+        ),
         Index(
             "ix_power_measurements_channel_measured_at",
             "channel_id",

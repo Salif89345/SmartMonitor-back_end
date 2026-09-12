@@ -1,0 +1,48 @@
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-backend:
+    name: Test backend and MQTT contract
+    runs-on: ubuntu-latest
+
+    env:
+      APP_ENV: dev
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: smartmonitor_test
+      DB_USER: smartmonitor_test
+      DB_PASSWORD: smartmonitor_test
+      JWT_SECRET_KEY: ci-only-secret
+      EMAIL_VERIFICATION_SECRET: ci-only-secret
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Validate dependency lock
+        run: python tools/check_dependency_lock.py --requirements requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify installed dependency lock
+        run: python tools/check_dependency_lock.py --requirements requirements.txt --verify-installed
+
+      - name: Validate DEV and PROD log profiles
+        run: python tools/check_log_profiles.py
+
+      - name: Run backend tests
+        run: python -m unittest discover -s tests -p "test_*.py"

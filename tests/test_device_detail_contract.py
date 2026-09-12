@@ -137,6 +137,33 @@ class DeviceDetailContractTests(
             NOW,
         )
 
+    def test_recent_state_proves_online_when_mqtt_status_is_temporarily_unknown(
+        self,
+    ):
+        device = make_device()
+
+        with (
+            patch(
+                "app.devices.live_state_store.get",
+                return_value=make_live_snapshot(
+                    received_at=datetime.now(timezone.utc)
+                ),
+            ),
+            patch(
+                "app.devices.mqtt_manager.get_device_status",
+                return_value=None,
+            ),
+        ):
+            response = build_device_list_response(
+                device,
+                "owner",
+            )
+
+        self.assertEqual(
+            response.availability,
+            "online",
+        )
+
     def test_live_snapshot_is_fresh_when_recent(
         self,
     ):
@@ -368,6 +395,67 @@ class DeviceDetailContractTests(
         self.assertEqual(
             response.telemetry.power_w,
             48.2,
+        )
+
+    def test_missing_live_channel_uses_its_latest_persisted_measurement(
+        self,
+    ):
+        device = make_device()
+        power_1 = make_channel(
+            channel_id=7,
+            channel_key="power_1",
+        )
+        power_2 = make_channel(
+            channel_id=8,
+            channel_key="power_2",
+        )
+        measurement = SimpleNamespace(
+            id=11,
+            channel_id=8,
+            measured_at=NOW,
+            received_at=NOW,
+            voltage_v=230.0,
+            current_a=0.5,
+            power_w=115.0,
+            energy_kwh=12.0,
+            frequency_hz=50.0,
+            power_factor=1.0,
+        )
+        db = MagicMock()
+        db.scalars.return_value.all.return_value = [
+            power_1,
+            power_2,
+        ]
+        db.scalar.return_value = measurement
+
+        with (
+            patch(
+                "app.devices.live_state_store.get",
+                return_value=make_live_snapshot(),
+            ),
+            patch(
+                "app.devices.mqtt_manager.get_device_status",
+                return_value="online",
+            ),
+        ):
+            response = build_device_detail_response(
+                device,
+                "owner",
+                db,
+            )
+
+        power_2_telemetry = (
+            response.telemetry.energy_channels[
+                "power_2"
+            ]
+        )
+        self.assertEqual(
+            power_2_telemetry.power_w,
+            115.0,
+        )
+        self.assertEqual(
+            power_2_telemetry.freshness,
+            "stale",
         )
 
     def test_no_live_or_persisted_measurement_returns_null(

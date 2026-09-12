@@ -1,0 +1,127 @@
+{
+  "op": "OP-017",
+  "result": "PASS",
+  "generated_at_utc": "2026-09-11T21:51:43.837481+00:00",
+  "python": "3.11.7",
+  "api": {
+    "health": {
+      "url": "http://127.0.0.1:8000/api/v1/health",
+      "latency_ms": {
+        "samples": 50,
+        "min": 1.109,
+        "mean": 1.95,
+        "p50": 1.291,
+        "p95": 2.816,
+        "max": 14.514
+      }
+    },
+    "database_health": {
+      "url": "http://127.0.0.1:8000/api/v1/health/database",
+      "latency_ms": {
+        "samples": 50,
+        "min": 1.624,
+        "mean": 3.423,
+        "p50": 1.805,
+        "p95": 19.4,
+        "max": 27.14
+      }
+    }
+  },
+  "database_roundtrip": {
+    "statement": "SELECT 1",
+    "latency_ms": {
+      "samples": 50,
+      "min": 0.107,
+      "mean": 0.138,
+      "p50": 0.122,
+      "p95": 0.256,
+      "max": 0.349
+    }
+  },
+  "observed_mqtt_to_db": {
+    "definition": "PowerMeasurement.received_at - device measured_at",
+    "latency_ms": {
+      "samples": 40,
+      "min": 161.954,
+      "mean": 725.128,
+      "p50": 756.312,
+      "p95": 988.797,
+      "max": 1014.668
+    },
+    "negative_sample_count": 0,
+    "newest_received_at": "2026-09-11T21:51:13.638281+00:00",
+    "oldest_received_at": "2026-09-11T21:32:01.008059+00:00",
+    "devices": [
+      "atelier"
+    ],
+    "channels": [
+      "power_1",
+      "power_2"
+    ]
+  },
+  "controlled_state_sql": {
+    "database": "temporary in-memory SQLite",
+    "sql_statements_per_channel": {
+      "cold_cache": 4,
+      "warm_cache_not_due": 0,
+      "persistence_due": 2
+    },
+    "single_samples": {
+      "cold_handler_ms": 3.907,
+      "cold_sql_ms": 0.198,
+      "warm_handler_ms": 0.005,
+      "warm_sql_ms": 0.0,
+      "due_handler_ms": 0.783,
+      "due_sql_ms": 0.054
+    },
+    "persistence_due_handler_ms": {
+      "samples": 30,
+      "min": 0.526,
+      "mean": 0.578,
+      "p50": 0.561,
+      "p95": 0.673,
+      "max": 0.695
+    },
+    "persistence_due_sql_ms": {
+      "samples": 30,
+      "min": 0.026,
+      "mean": 0.033,
+      "p50": 0.028,
+      "p95": 0.059,
+      "max": 0.091
+    }
+  },
+  "query_model": {
+    "assumptions": {
+      "channels": 2,
+      "state_interval_seconds": 5.0,
+      "persistence_interval_seconds": 60.0
+    },
+    "pre_op003_sql_statements_per_state": 4.0,
+    "current_steady_state_sql_statements_per_state": 0.333,
+    "modeled_reduction_percent": 91.667,
+    "note": "Daily summary and retention checks are excluded from steady state."
+  },
+  "process": {
+    "available": true,
+    "pid": 14920,
+    "samples": 8,
+    "cpu_percent_of_machine": 0.741,
+    "working_set_mb": {
+      "samples": 8,
+      "min": 64.277,
+      "mean": 64.521,
+      "p50": 64.582,
+      "p95": 64.582,
+      "max": 64.582
+    },
+    "private_memory_mb": {
+      "samples": 8,
+      "min": 70.676,
+      "mean": 70.941,
+      "p50": 71.008,
+      "p95": 71.008,
+      "max": 71.008
+    }
+  }
+}

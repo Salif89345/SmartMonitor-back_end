@@ -12,11 +12,10 @@ from app.models import (
     PowerDailySummary,
     PowerMeasurement,
 )
-
-
-POWER_MEASUREMENT_RETENTION_DAYS = 90
-POWER_DAILY_SUMMARY_RETENTION_DAYS = 365
-
+from app.measurement_contract import (
+    POWER_DAILY_SUMMARY_RETENTION_DAYS,
+    POWER_MEASUREMENT_RETENTION_DAYS,
+)
 
 def cleanup_channel_history(
     db: Session,

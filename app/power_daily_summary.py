@@ -16,9 +16,12 @@ from app.models import (
     PowerDailySummary,
     PowerMeasurement,
 )
+from app.measurement_contract import (
+    HISTORY_TIMEZONE_NAME,
+)
 
 
-SMARTMONITOR_TIMEZONE_NAME = "Europe/Paris"
+SMARTMONITOR_TIMEZONE_NAME = HISTORY_TIMEZONE_NAME
 
 SMARTMONITOR_TIMEZONE = ZoneInfo(
     SMARTMONITOR_TIMEZONE_NAME

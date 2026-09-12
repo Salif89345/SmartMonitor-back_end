@@ -126,6 +126,29 @@ class DeviceChannelPublic(BaseModel):
     is_enabled: bool
 
 
+class EnergyChannelTelemetryPublic(BaseModel):
+    freshness: MeasurementFreshness | None = None
+    age_ms: int | None = None
+
+    voltage_v: float | None = None
+    voltage_quality: MeasurementQuality | None = None
+
+    current_a: float | None = None
+    current_quality: MeasurementQuality | None = None
+
+    power_w: float | None = None
+    power_quality: MeasurementQuality | None = None
+
+    energy_kwh: float | None = None
+    energy_quality: MeasurementQuality | None = None
+
+    frequency_hz: float | None = None
+    frequency_quality: MeasurementQuality | None = None
+
+    power_factor: float | None = None
+    power_factor_quality: MeasurementQuality | None = None
+
+
 class DeviceTelemetryPublic(BaseModel):
     source: Literal[
         "mqtt",
@@ -152,6 +175,11 @@ class DeviceTelemetryPublic(BaseModel):
 
     sensor_status: str | None = None
     energy_status: str | None = None
+
+    energy_channels: dict[
+        str,
+        EnergyChannelTelemetryPublic,
+    ] | None = None
 
     sensor_freshness: MeasurementFreshness | None = None
     sensor_age_ms: int | None = None

@@ -1,4 +1,4 @@
-﻿from typing import Any
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from app.models import Device, DeviceEvent
 DEVICE_EVENT_TYPES = {
     "device_online",
     "device_offline",
+    "network_outage",
     "command_ack",
     "command_nack",
 

@@ -1,6 +1,12 @@
 import os
 
+from app.measurement_contract import (
+    POWER_HISTORY_INTERVAL_SECONDS_DEFAULT,
+)
+
 from dotenv import load_dotenv
+
+from app.logging_config import resolve_log_level
 
 
 def _split_csv(
@@ -55,6 +61,12 @@ if APP_ENV == "dev":
     load_dotenv()
 
 
+LOG_LEVEL = resolve_log_level(
+    APP_ENV,
+    os.getenv("LOG_LEVEL"),
+)
+
+
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
@@ -103,18 +115,48 @@ MQTT_CA_CERT_PATH = os.getenv(
     "MQTT_CA_CERT_PATH"
 )
 
-if MQTT_TLS_ENABLED and not MQTT_CA_CERT_PATH:
+if MQTT_CA_CERT_PATH is not None:
+    MQTT_CA_CERT_PATH = (
+        MQTT_CA_CERT_PATH.strip() or None
+    )
+
+if (
+    APP_ENV == "prod"
+    and MQTT_TLS_ENABLED
+    and not MQTT_CA_CERT_PATH
+):
     raise RuntimeError(
         "MQTT_CA_CERT_PATH is required "
-        "when MQTT_TLS_ENABLED is true"
+        "in production when MQTT_TLS_ENABLED "
+        "is true"
     )
 
 POWER_HISTORY_INTERVAL_SECONDS = int(
     os.getenv(
         "POWER_HISTORY_INTERVAL_SECONDS",
-        "60",
+        str(
+            POWER_HISTORY_INTERVAL_SECONDS_DEFAULT
+        ),
     )
 )
+
+if POWER_HISTORY_INTERVAL_SECONDS < 1:
+    raise RuntimeError(
+        "POWER_HISTORY_INTERVAL_SECONDS must be at least 1"
+    )
+
+
+MQTT_INGESTION_QUEUE_SIZE = int(
+    os.getenv(
+        "MQTT_INGESTION_QUEUE_SIZE",
+        "500",
+    )
+)
+
+if MQTT_INGESTION_QUEUE_SIZE < 1:
+    raise RuntimeError(
+        "MQTT_INGESTION_QUEUE_SIZE must be at least 1"
+    )
 
 
 JWT_SECRET_KEY = os.getenv(

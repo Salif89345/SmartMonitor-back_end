@@ -40,6 +40,7 @@ from app.schemas import (
     DeviceDetailPublic,
     DeviceListPublic,
     DeviceTelemetryPublic,
+    EnergyChannelTelemetryPublic,
     DeviceClaimRequest,
     DeviceEventPublic,
     DeviceHistoryResponse,
@@ -75,6 +76,23 @@ def _device_availability(
         "offline",
     ):
         return device_status
+
+    # Un etat MQTT peut etre momentanement indisponible pendant une
+    # reconnexion du backend. Une telemetrie recue recemment constitue
+    # cependant une preuve positive que l'appareil est en ligne.
+    live_snapshot = live_state_store.get(
+        device.mqtt_device_id
+    )
+
+    received_at = _snapshot_received_at(
+        live_snapshot
+    )
+
+    if received_at is not None:
+        age_seconds = _age_seconds(received_at)
+
+        if age_seconds <= LIVE_STATE_FRESH_SECONDS:
+            return "online"
 
     return "unknown"
 
@@ -253,6 +271,10 @@ def _build_live_telemetry(
             "energy_status"
         ),
 
+        energy_channels=snapshot.get(
+            "energy_channels"
+        ),
+
         sensor_freshness=snapshot.get(
             "sensor_freshness"
         ),
@@ -325,14 +347,15 @@ def _build_live_telemetry(
     )
 
 
-def _build_persisted_telemetry(
+def _persisted_energy_channel(
     db: Session,
     channel: DeviceChannel,
-) -> DeviceTelemetryPublic | None:
+) -> tuple[
+    EnergyChannelTelemetryPublic,
+    PowerMeasurement,
+] | None:
     measurement = db.scalar(
-        select(
-            PowerMeasurement
-        )
+        select(PowerMeasurement)
         .where(
             PowerMeasurement.channel_id
             == channel.id
@@ -347,42 +370,201 @@ def _build_persisted_telemetry(
     if measurement is None:
         return None
 
-    return DeviceTelemetryPublic(
-        source="persisted",
-        freshness="stale",
-
-        received_at=(
-            measurement.received_at
-        ),
-        measured_at=(
-            measurement.measured_at
-        ),
-        age_seconds=(
+    age_ms = max(
+        0,
+        int(
             _age_seconds(
                 measurement.received_at
             )
-        ),
-
-        voltage_v=(
-            measurement.voltage_v
-        ),
-        current_a=(
-            measurement.current_a
-        ),
-        power_w=(
-            measurement.power_w
-        ),
-        energy_kwh=(
-            measurement.energy_kwh
-        ),
-        frequency_hz=(
-            measurement.frequency_hz
-        ),
-        power_factor=(
-            measurement.power_factor
+            * 1000
         ),
     )
 
+    return (
+        EnergyChannelTelemetryPublic(
+            freshness="stale",
+            age_ms=age_ms,
+            voltage_v=measurement.voltage_v,
+            current_a=measurement.current_a,
+            power_w=measurement.power_w,
+            energy_kwh=measurement.energy_kwh,
+            frequency_hz=measurement.frequency_hz,
+            power_factor=measurement.power_factor,
+        ),
+        measurement,
+    )
+
+
+def _energy_channel_has_values(
+    telemetry: EnergyChannelTelemetryPublic | None,
+) -> bool:
+    if telemetry is None:
+        return False
+
+    return any(
+        value is not None
+        for value in (
+            telemetry.voltage_v,
+            telemetry.current_a,
+            telemetry.power_w,
+            telemetry.energy_kwh,
+            telemetry.frequency_hz,
+            telemetry.power_factor,
+        )
+    )
+
+
+def _complete_energy_channels_from_history(
+    db: Session,
+    channels: list[DeviceChannel],
+    telemetry: DeviceTelemetryPublic | None,
+) -> DeviceTelemetryPublic | None:
+    energy_channels = dict(
+        telemetry.energy_channels or {}
+        if telemetry is not None
+        else {}
+    )
+    newest_measurement = None
+    primary_measurement = None
+
+    for channel in channels:
+        if (
+            not channel.is_enabled
+            or not channel.channel_key.startswith(
+                "power_"
+            )
+        ):
+            continue
+
+        live_channel = energy_channels.get(
+            channel.channel_key
+        )
+
+        has_legacy_power_1 = (
+            telemetry is not None
+            and channel.channel_key == "power_1"
+            and any(
+                value is not None
+                for value in (
+                    telemetry.voltage_v,
+                    telemetry.current_a,
+                    telemetry.power_w,
+                    telemetry.energy_kwh,
+                    telemetry.frequency_hz,
+                    telemetry.power_factor,
+                )
+            )
+        )
+
+        if (
+            _energy_channel_has_values(
+                live_channel
+            )
+            or has_legacy_power_1
+        ):
+            continue
+
+        persisted = _persisted_energy_channel(
+            db,
+            channel,
+        )
+
+        if persisted is None:
+            continue
+
+        persisted_channel, measurement = (
+            persisted
+        )
+        energy_channels[channel.channel_key] = (
+            persisted_channel
+        )
+
+        if (
+            newest_measurement is None
+            or measurement.received_at
+            > newest_measurement.received_at
+        ):
+            newest_measurement = measurement
+
+        if channel.channel_key == "power_1":
+            primary_measurement = measurement
+
+    if telemetry is not None:
+        updates = {
+            "energy_channels": (
+                energy_channels or None
+            )
+        }
+
+        if primary_measurement is not None:
+            for field_name in (
+                "voltage_v",
+                "current_a",
+                "power_w",
+                "energy_kwh",
+                "frequency_hz",
+                "power_factor",
+            ):
+                if getattr(
+                    telemetry,
+                    field_name,
+                ) is None:
+                    updates[field_name] = getattr(
+                        primary_measurement,
+                        field_name,
+                    )
+
+        return telemetry.model_copy(
+            update=updates
+        )
+
+    if newest_measurement is None:
+        return None
+
+    return DeviceTelemetryPublic(
+        source="persisted",
+        freshness="stale",
+        received_at=(
+            newest_measurement.received_at
+        ),
+        measured_at=(
+            newest_measurement.measured_at
+        ),
+        age_seconds=_age_seconds(
+            newest_measurement.received_at
+        ),
+        energy_channels=energy_channels,
+        voltage_v=(
+            primary_measurement.voltage_v
+            if primary_measurement is not None
+            else None
+        ),
+        current_a=(
+            primary_measurement.current_a
+            if primary_measurement is not None
+            else None
+        ),
+        power_w=(
+            primary_measurement.power_w
+            if primary_measurement is not None
+            else None
+        ),
+        energy_kwh=(
+            primary_measurement.energy_kwh
+            if primary_measurement is not None
+            else None
+        ),
+        frequency_hz=(
+            primary_measurement.frequency_hz
+            if primary_measurement is not None
+            else None
+        ),
+        power_factor=(
+            primary_measurement.power_factor
+            if primary_measurement is not None
+            else None
+        ),
+    )
 
 def build_device_detail_response(
     device: Device,
@@ -432,16 +614,13 @@ def build_device_detail_response(
         )
     )
 
-    if (
-        telemetry is None
-        and telemetry_channel is not None
-    ):
-        telemetry = (
-            _build_persisted_telemetry(
-                db,
-                telemetry_channel,
-            )
+    telemetry = (
+        _complete_energy_channels_from_history(
+            db,
+            channels,
+            telemetry,
         )
+    )
 
     return DeviceDetailPublic(
         id=device.id,
@@ -682,25 +861,60 @@ def claim_device(
                 "owner"
             )
 
-        power_channel = db.scalar(
-            select(
-                DeviceChannel
-            ).where(
-                DeviceChannel.device_id
-                == device.id,
-
-                DeviceChannel.channel_key
-                == "power_1",
-            )
+        default_power_channels = (
+            (
+                "power_1",
+                "Power",
+                True,
+            ),
+            (
+                "power_2",
+                "Power 2",
+                True,
+            ),
+            (
+                "power_3",
+                "Power 3",
+                True,
+            ),
+            (
+                "power_4",
+                "Power 4",
+                False,
+            ),
         )
 
-        if power_channel is None:
+        existing_channel_keys = set(
+            db.scalars(
+                select(
+                    DeviceChannel.channel_key
+                )
+                .where(
+                    DeviceChannel.device_id
+                    == device.id
+                )
+            ).all()
+        )
+
+        for (
+            channel_key,
+            channel_name,
+            enabled,
+        ) in default_power_channels:
+            if (
+                channel_key
+                in existing_channel_keys
+            ):
+                continue
+
             db.add(
                 DeviceChannel(
                     device_id=device.id,
-                    channel_key="power_1",
-                    name="Power",
-                    is_enabled=True,
+                    channel_key=(
+                        channel_key
+                    ),
+                    name=channel_name,
+                    is_enabled=enabled,
                 )
             )
 

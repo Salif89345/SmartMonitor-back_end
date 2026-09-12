@@ -16,16 +16,20 @@ from app.auth import router as auth_router
 from app.commands import router as commands_router
 from app.database import check_database_connection
 from app.devices import router as devices_router
+from app.logging_config import configure_logging
 from app.mqtt_client import mqtt_manager
 from app.settings import (
     API_ALLOWED_HOSTS,
     APP_ENV,
     CORS_ALLOWED_ORIGINS,
+    LOG_LEVEL,
 )
 
 
+configure_logging(LOG_LEVEL)
+
 logger = logging.getLogger(
-    "uvicorn.error"
+    "smartmonitor.api"
 )
 
 

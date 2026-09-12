@@ -1,5 +1,7 @@
 import unittest
 
+from datetime import datetime, timedelta, timezone
+
 from app.device_live_state import DeviceLiveStateStore
 
 
@@ -90,6 +92,56 @@ class LiveStateTests(unittest.TestCase):
 
         self.assertIsNotNone(second)
         self.assertEqual(second["power_w"], 52.4)
+
+    def test_transient_sensor_failure_keeps_recent_values_as_stale(self):
+        now = [datetime(2026, 9, 12, tzinfo=timezone.utc)]
+        store = DeviceLiveStateStore(
+            clock=lambda: now[0]
+        )
+        valid = base_payload()
+        valid["environment"] = {
+            "freshness": "fresh",
+            "age_ms": 0,
+            "temperature_c": 26.5,
+            "temperature_quality": "ok",
+            "humidity_pct": 36.4,
+            "humidity_quality": "ok",
+        }
+        store.update(
+            mqtt_device_id=MQTT_DEVICE_ID,
+            payload=valid,
+        )
+
+        now[0] += timedelta(seconds=5)
+        unavailable = base_payload()
+        unavailable["environment"] = {
+            "freshness": "unknown",
+            "age_ms": None,
+            "temperature_c": None,
+            "temperature_quality": "unavailable",
+            "humidity_pct": None,
+            "humidity_quality": "unavailable",
+        }
+        store.update(
+            mqtt_device_id=MQTT_DEVICE_ID,
+            payload=unavailable,
+        )
+        state = store.get(MQTT_DEVICE_ID)
+
+        self.assertEqual(state["temperature_c"], 26.5)
+        self.assertEqual(state["humidity_pct"], 36.4)
+        self.assertEqual(state["sensor_freshness"], "stale")
+        self.assertEqual(state["sensor_age_ms"], 5000)
+
+        now[0] += timedelta(seconds=16)
+        store.update(
+            mqtt_device_id=MQTT_DEVICE_ID,
+            payload=unavailable,
+        )
+        expired = store.get(MQTT_DEVICE_ID)
+
+        self.assertIsNone(expired["temperature_c"])
+        self.assertIsNone(expired["humidity_pct"])
 
 
 if __name__ == "__main__":

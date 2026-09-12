@@ -1,0 +1,22 @@
+{
+  "op": "OP-016",
+  "result": "PASS",
+  "python": "3.11.7",
+  "python_implementation": "CPython",
+  "requirements_file": "requirements.txt",
+  "locked_dependency_count": 32,
+  "critical_dependency_count": 10,
+  "installed_environment_verified": true,
+  "critical_dependencies": {
+    "alembic": "1.19.1",
+    "argon2-cffi": "25.1.0",
+    "fastapi": "0.141.1",
+    "paho-mqtt": "2.1.0",
+    "psycopg": "3.3.4",
+    "pydantic": "2.13.4",
+    "pyjwt": "2.13.0",
+    "python-dotenv": "1.2.2",
+    "sqlalchemy": "2.0.51",
+    "uvicorn": "0.52.1"
+  }
+}
