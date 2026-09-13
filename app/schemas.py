@@ -149,6 +149,33 @@ class EnergyChannelTelemetryPublic(BaseModel):
     power_factor_quality: MeasurementQuality | None = None
 
 
+class AlarmSnapshotPublic(BaseModel):
+    id: str
+    state: Literal[
+        "normal",
+        "pending_active",
+        "active",
+        "pending_clear",
+    ]
+    severity: Literal["info", "warning", "critical"]
+    value: float | None = None
+    threshold: float
+    hysteresis: float
+    delay_ms: int
+    active_since_ms: int
+    transition_count: int
+
+
+class AlarmEnginePublic(BaseModel):
+    ready: bool
+    self_test_passed: bool
+    enabled_rule_count: int
+    active_count: int
+    pending_count: int
+    transition_sequence: int
+    items: list[AlarmSnapshotPublic]
+
+
 class DeviceTelemetryPublic(BaseModel):
     source: Literal[
         "mqtt",
@@ -211,12 +238,30 @@ class DeviceTelemetryPublic(BaseModel):
     power_factor: float | None = None
     power_factor_quality: MeasurementQuality | None = None
 
+    alarms: AlarmEnginePublic | None = None
+
+
+class AlarmOccurrencePublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    device_id: int
+    alarm_key: str
+    severity: Literal["info", "warning", "critical"]
+    status: Literal["active", "cleared"]
+    value: float | None
+    threshold: float | None
+    activated_at: datetime
+    cleared_at: datetime | None
+    acknowledged_at: datetime | None
+
 
 class DeviceDetailPublic(DeviceListPublic):
     channels: list[DeviceChannelPublic]
 
     telemetry_channel_id: int | None
     telemetry: DeviceTelemetryPublic | None
+    active_alarms: list[AlarmOccurrencePublic] = Field(default_factory=list)
 
 
 

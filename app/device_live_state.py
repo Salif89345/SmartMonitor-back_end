@@ -348,6 +348,96 @@ class DeviceLiveStateStore:
                 ),
         }
 
+    def _normalize_alarms(
+        self,
+        value,
+    ) -> dict | None:
+        if not isinstance(value, dict):
+            return None
+
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list):
+            return None
+
+        items = []
+        for raw in raw_items[:6]:
+            if not isinstance(raw, dict):
+                continue
+
+            alarm_id = self._text(raw.get("id"))
+            state = self._text(raw.get("state"))
+            severity = self._text(raw.get("severity"))
+            threshold = self._finite_float(raw.get("threshold"))
+            hysteresis = self._finite_float(raw.get("hysteresis"))
+            delay_ms = self._non_negative_int(raw.get("delay_ms"))
+            active_since_ms = self._non_negative_int(
+                raw.get("active_since_ms")
+            )
+            transition_count = self._non_negative_int(
+                raw.get("transition_count")
+            )
+
+            if (
+                alarm_id is None
+                or len(alarm_id) > 63
+                or state not in {
+                    "normal",
+                    "pending_active",
+                    "active",
+                    "pending_clear",
+                }
+                or severity not in {"info", "warning", "critical"}
+                or threshold is None
+                or hysteresis is None
+                or delay_ms is None
+                or active_since_ms is None
+                or transition_count is None
+            ):
+                continue
+
+            items.append(
+                {
+                    "id": alarm_id,
+                    "state": state,
+                    "severity": severity,
+                    "value": self._finite_float(raw.get("value")),
+                    "threshold": threshold,
+                    "hysteresis": hysteresis,
+                    "delay_ms": delay_ms,
+                    "active_since_ms": active_since_ms,
+                    "transition_count": transition_count,
+                }
+            )
+
+        normalized = {
+            "ready": value.get("ready") is True,
+            "self_test_passed": value.get("self_test_passed") is True,
+            "enabled_rule_count": self._non_negative_int(
+                value.get("enabled_rule_count")
+            ),
+            "active_count": self._non_negative_int(value.get("active_count")),
+            "pending_count": self._non_negative_int(
+                value.get("pending_count")
+            ),
+            "transition_sequence": self._non_negative_int(
+                value.get("transition_sequence")
+            ),
+            "items": items,
+        }
+
+        if any(
+            normalized[key] is None
+            for key in (
+                "enabled_rule_count",
+                "active_count",
+                "pending_count",
+                "transition_sequence",
+            )
+        ):
+            return None
+
+        return normalized
+
     def update(
         self,
         *,
@@ -464,6 +554,8 @@ class DeviceLiveStateStore:
             ):
                 measured_at = None
 
+        alarms = self._normalize_alarms(payload.get("alarms"))
+
         snapshot = {
             "received_at": received_at,
             "measured_at": measured_at,
@@ -561,6 +653,7 @@ class DeviceLiveStateStore:
             "power_factor_quality": self._measurement_quality(
                 primary_energy.get("power_factor_quality")
             ),
+            "alarms": alarms,
         }
 
         with self._lock:

@@ -299,6 +299,14 @@ class Device(Base):
         passive_deletes=True,
     )
 
+    alarm_occurrences: Mapped[
+        list["AlarmOccurrence"]
+    ] = relationship(
+        back_populates="device",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
 
 class DeviceMembership(Base):
     __tablename__ = "device_memberships"
@@ -689,4 +697,89 @@ class DeviceEvent(Base):
 
     device: Mapped["Device"] = relationship(
         back_populates="events",
+    )
+
+
+class AlarmOccurrence(Base):
+    __tablename__ = "alarm_occurrences"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id",
+            "source_boot_count",
+            "alarm_key",
+            "activation_transition_count",
+            name="uq_alarm_occurrence_source",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'cleared')",
+            name="ck_alarm_occurrences_status",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="ck_alarm_occurrences_severity",
+        ),
+        Index(
+            "ix_alarm_occurrences_device_status_activated",
+            "device_id",
+            "status",
+            "activated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alarm_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    source_boot_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    activation_transition_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    clear_transition_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    activated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    cleared_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    acknowledged_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
+
+    device: Mapped["Device"] = relationship(
+        back_populates="alarm_occurrences",
     )

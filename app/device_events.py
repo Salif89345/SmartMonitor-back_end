@@ -27,6 +27,9 @@ DEVICE_EVENT_TYPES = {
 
     "sensor_fault",
     "sensor_recovered",
+    "alarm_activated",
+    "alarm_cleared",
+    "alarm_acknowledged",
 }
 
 

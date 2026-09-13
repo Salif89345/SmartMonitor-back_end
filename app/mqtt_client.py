@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from app.claim_proof_store import ClaimProofStore
 from app.database import SessionLocal
 from app.device_events import create_device_event_by_mqtt_id
+from app.alarm_service import ingest_alarm_snapshot
 from app.device_live_state import live_state_store
 from app.ingestion_cache import (
     PowerChannelState,
@@ -108,6 +109,7 @@ class MqttManager:
         ] = {}
 
         self._daily_summary_checked_date = {}
+        self._alarm_snapshot_signatures: dict[str, tuple] = {}
 
         self._ingestion_queue: Queue[
             IncomingMqttMessage | None
@@ -899,6 +901,66 @@ class MqttManager:
         finally:
             db.close()
 
+    def _persist_alarm_snapshot(
+        self,
+        *,
+        mqtt_device_id: str,
+        alarms,
+        boot_count,
+        occurred_at,
+    ) -> None:
+        if not isinstance(alarms, dict) or not isinstance(
+            alarms.get("items"),
+            list,
+        ):
+            return
+
+        signature = (
+            boot_count,
+            tuple(
+                (
+                    item.get("id"),
+                    item.get("state"),
+                    item.get("transition_count"),
+                )
+                for item in alarms["items"]
+                if isinstance(item, dict)
+            ),
+        )
+        if self._alarm_snapshot_signatures.get(mqtt_device_id) == signature:
+            return
+
+        db = SessionLocal()
+        try:
+            changes = ingest_alarm_snapshot(
+                db,
+                mqtt_device_id=mqtt_device_id,
+                alarms=alarms,
+                boot_count=boot_count,
+                occurred_at=occurred_at,
+            )
+            db.commit()
+            self._alarm_snapshot_signatures[mqtt_device_id] = signature
+            if changes:
+                print(
+                    "[SM-034] Alarm transition stored:",
+                    "| device:",
+                    mqtt_device_id,
+                    "| changes:",
+                    changes,
+                )
+        except Exception as exc:
+            db.rollback()
+            print(
+                "[SM-034] Alarm persistence failed:",
+                "| device:",
+                mqtt_device_id,
+                "| error:",
+                type(exc).__name__,
+            )
+        finally:
+            db.close()
+
 
     def get_device_status(
         self,
@@ -1624,6 +1686,13 @@ class MqttManager:
             )
 
             return
+
+        self._persist_alarm_snapshot(
+            mqtt_device_id=mqtt_device_id,
+            alarms=payload.get("alarms"),
+            boot_count=system.get("boot_count"),
+            occurred_at=measured_at,
+        )
 
         managers = payload.get(
             "managers"

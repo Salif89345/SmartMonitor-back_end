@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.alarm_service import acknowledge_alarm
 from app.database import get_db
 from app.device_live_state import live_state_store
 from app.history_service import (
@@ -27,6 +28,7 @@ from app.history_service import (
 from app.mqtt_client import mqtt_manager
 from app.models import (
     Device,
+    AlarmOccurrence,
     DeviceChannel,
     DeviceEvent,
     DeviceMembership,
@@ -43,6 +45,7 @@ from app.schemas import (
     EnergyChannelTelemetryPublic,
     DeviceClaimRequest,
     DeviceEventPublic,
+    AlarmOccurrencePublic,
     DeviceHistoryResponse,
     DeviceMemberPublic,
 )
@@ -344,6 +347,8 @@ def _build_live_telemetry(
         power_factor_quality=snapshot.get(
             "power_factor_quality"
         ),
+
+        alarms=snapshot.get("alarms"),
     )
 
 
@@ -622,6 +627,22 @@ def build_device_detail_response(
         )
     )
 
+    active_alarms = [
+        alarm
+        for alarm in db.scalars(
+            select(AlarmOccurrence)
+            .where(
+                AlarmOccurrence.device_id == device.id,
+                AlarmOccurrence.status == "active",
+            )
+            .order_by(
+                AlarmOccurrence.activated_at.desc(),
+                AlarmOccurrence.id.desc(),
+            )
+        ).all()
+        if isinstance(alarm, AlarmOccurrence)
+    ]
+
     return DeviceDetailPublic(
         id=device.id,
         device_uid=device.device_uid,
@@ -661,6 +682,7 @@ def build_device_detail_response(
         ),
 
         telemetry=telemetry,
+        active_alarms=active_alarms,
     )
 
 
@@ -1274,6 +1296,89 @@ def remove_device_member(
     db.commit()
 
     return None
+
+
+@router.get(
+    "/{device_id}/alarms",
+    response_model=list[AlarmOccurrencePublic],
+)
+def list_device_alarms(
+    device_id: int,
+    active_only: bool = False,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id == device_id,
+            DeviceMembership.user_id == current_user.id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+
+    statement = select(AlarmOccurrence).where(
+        AlarmOccurrence.device_id == device_id
+    )
+    if active_only:
+        statement = statement.where(AlarmOccurrence.status == "active")
+
+    return list(
+        db.scalars(
+            statement.order_by(
+                AlarmOccurrence.activated_at.desc(),
+                AlarmOccurrence.id.desc(),
+            ).limit(limit)
+        ).all()
+    )
+
+
+@router.post(
+    "/{device_id}/alarms/{alarm_id}/acknowledge",
+    response_model=AlarmOccurrencePublic,
+)
+def acknowledge_device_alarm(
+    device_id: int,
+    alarm_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    membership = db.scalar(
+        select(DeviceMembership).where(
+            DeviceMembership.device_id == device_id,
+            DeviceMembership.user_id == current_user.id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+
+    occurrence = db.scalar(
+        select(AlarmOccurrence).where(
+            AlarmOccurrence.id == alarm_id,
+            AlarmOccurrence.device_id == device_id,
+        )
+    )
+    if occurrence is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alarm not found",
+        )
+
+    acknowledge_alarm(
+        db,
+        occurrence=occurrence,
+        user_id=current_user.id,
+    )
+    db.commit()
+    db.refresh(occurrence)
+    return occurrence
 
 
 @router.get(
