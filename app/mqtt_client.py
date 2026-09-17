@@ -12,7 +12,19 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.claim_proof_store import ClaimProofStore
+from app.command_security import (
+    AuthorizedDeviceCommand,
+    CommandRisk,
+    LOCAL_HISTORY_RECOVERY_SERVICE,
+    authorize_service_device_command,
+    build_authorized_command_payload,
+)
 from app.database import SessionLocal
+from app.device_identity import (
+    DeviceIdentityError,
+    is_canonical_device_uid,
+    validate_state_identity,
+)
 from app.device_events import create_device_event_by_mqtt_id
 from app.alarm_service import ingest_alarm_snapshot
 from app.device_live_state import live_state_store
@@ -20,16 +32,21 @@ from app.ingestion_cache import (
     PowerChannelState,
     PowerIngestionCache,
 )
+from app.local_history_recovery import (
+    LocalHistoryRecoveryCoordinator,
+)
 from app.mqtt_contract import (
     MqttContractError,
     build_command_payload,
     validate_response_payload,
 )
 from app.mqtt_ingestion import IncomingMqttMessage
+from app.mqtt_security import build_mqtt_tls_context
 from app.measurement_contract import (
     normalize_electrical_measurement,
 )
 from app.settings import (
+    COMMAND_AUTH_KEYS_PATH,
     MQTT_CA_CERT_PATH,
     MQTT_CLIENT_ID,
     MQTT_HOST,
@@ -127,6 +144,10 @@ class MqttManager:
 
         self._claim_proof_store = ClaimProofStore()
 
+        self._history_recovery = LocalHistoryRecoveryCoordinator(
+            command_sender=self._send_history_recovery_command,
+        )
+
         self.client = mqtt.Client(
             callback_api_version=
                 mqtt.CallbackAPIVersion.VERSION2,
@@ -141,8 +162,10 @@ class MqttManager:
             )
 
         if MQTT_TLS_ENABLED:
-            self.client.tls_set(
-                ca_certs=MQTT_CA_CERT_PATH,
+            self.client.tls_set_context(
+                build_mqtt_tls_context(
+                    MQTT_CA_CERT_PATH,
+                )
             )
 
         self.client.reconnect_delay_set(
@@ -531,13 +554,7 @@ class MqttManager:
         mqtt_device_id = payload.get("mqtt_device_id")
 
         if (
-            not isinstance(device_uid, str)
-            or len(device_uid) != 15
-            or not device_uid.startswith("SM-")
-            or any(
-                character not in "0123456789ABCDEF"
-                for character in device_uid[3:]
-            )
+            not is_canonical_device_uid(device_uid)
             or device_uid != topic_device_uid
         ):
             print(
@@ -1609,9 +1626,29 @@ class MqttManager:
 
             return
 
+        try:
+            validate_state_identity(
+                topic_mqtt_device_id=mqtt_device_id,
+                payload=payload,
+                schema_version=schema_version,
+            )
+        except DeviceIdentityError as error:
+            logger.warning(
+                "[SM-058-SEC] State identity rejected: %s",
+                error,
+            )
+            return
+
         live_state_store.update(
             mqtt_device_id=mqtt_device_id,
             payload=payload,
+        )
+
+        self._history_recovery.schedule(
+            mqtt_device_id=mqtt_device_id,
+            device_uid=payload.get("device_uid"),
+            local_history=payload.get("local_history"),
+            managers=payload.get("managers"),
         )
 
         system = payload.get(
@@ -1835,6 +1872,7 @@ class MqttManager:
         )
 
         self._start_ingestion_worker()
+        self._history_recovery.start()
 
         self.client.connect_async(
             MQTT_HOST,
@@ -1845,17 +1883,77 @@ class MqttManager:
         self.client.loop_start()
 
     def stop(self):
+        self._history_recovery.stop()
         self.client.disconnect()
         self.client.loop_stop()
         self._stop_ingestion_worker()
 
+    def _send_history_recovery_command(
+        self,
+        mqtt_device_id: str,
+        device_uid: str,
+        command: str,
+        parameters: dict,
+    ) -> dict:
+        authorization = authorize_service_device_command(
+            service=LOCAL_HISTORY_RECOVERY_SERVICE,
+            device_uid=device_uid,
+            command=command,
+        )
+
+        return self.send_command(
+            mqtt_device_id=mqtt_device_id,
+            authorization=authorization,
+            actor_user_id=None,
+            actor_service=LOCAL_HISTORY_RECOVERY_SERVICE,
+            parameters=parameters,
+            timeout=8.0,
+        )
+
     def send_command(
         self,
         mqtt_device_id: str,
-        command: str,
+        authorization: AuthorizedDeviceCommand,
+        actor_user_id: int | None,
         parameters: dict | None = None,
         timeout: float = 5.0,
+        actor_service: str | None = None,
     ) -> dict:
+        if not isinstance(authorization, AuthorizedDeviceCommand):
+            raise TypeError(
+                "A command authorization decision is required"
+            )
+
+        has_user_actor = (
+            type(actor_user_id) is int
+            and actor_user_id > 0
+        )
+        has_service_actor = (
+            isinstance(actor_service, str)
+            and actor_service == LOCAL_HISTORY_RECOVERY_SERVICE
+        )
+
+        if has_user_actor == has_service_actor:
+            raise ValueError(
+                "Exactly one authorized command actor is required"
+            )
+
+        command = authorization.command
+
+        if has_service_actor and command not in (
+            "get_history",
+            "ack_history",
+        ):
+            raise ValueError(
+                "Service actor is not authorized for this command"
+            )
+
+        actor_data = (
+            {"actor_user_id": actor_user_id}
+            if has_user_actor
+            else {"actor_service": actor_service}
+        )
+
         if not self.is_connected():
             raise RuntimeError(
                 "MQTT backend is not connected"
@@ -1900,10 +1998,11 @@ class MqttManager:
             f"{mqtt_device_id}/response"
         )
 
-        payload = build_command_payload(
+        payload = build_authorized_command_payload(
+            authorization=authorization,
             request_id=request_id,
-            command=command,
             parameters=parameters,
+            keys_path=COMMAND_AUTH_KEYS_PATH,
         )
 
         pending = {
@@ -1915,6 +2014,11 @@ class MqttManager:
                 response_topic,
             "contract_error":
                 None,
+            **actor_data,
+            "authorization_action":
+                authorization.policy.action.value,
+            "risk":
+                authorization.policy.risk.value,
         }
 
         with self._pending_lock:
@@ -1947,7 +2051,26 @@ class MqttManager:
                 command_topic,
                 "| request_id:",
                 request_id,
+                "| action:",
+                authorization.policy.action.value,
+                "| risk:",
+                authorization.policy.risk.value,
             )
+
+            if authorization.policy.risk is CommandRisk.CRITICAL:
+                self._persist_device_event(
+                    mqtt_device_id=mqtt_device_id,
+                    event_type="command_dispatched",
+                    data={
+                        "request_id": request_id,
+                        "command": command,
+                        **actor_data,
+                        "authorization_action":
+                            authorization.policy.action.value,
+                        "risk":
+                            authorization.policy.risk.value,
+                    },
+                )
 
             response_received = (
                 pending[
@@ -2021,6 +2144,10 @@ class MqttManager:
             event_data = {
                 "request_id": request_id,
                 "command": command,
+                **actor_data,
+                "authorization_action":
+                    authorization.policy.action.value,
+                "risk": authorization.policy.risk.value,
             }
 
             error_code = response.get(
@@ -2098,6 +2225,7 @@ class MqttManager:
                     self._ingestion_dropped_messages
                 ),
             },
+            "history_recovery": self._history_recovery.status(),
             }
 
 

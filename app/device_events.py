@@ -10,6 +10,7 @@ DEVICE_EVENT_TYPES = {
     "device_online",
     "device_offline",
     "network_outage",
+    "command_dispatched",
     "command_ack",
     "command_nack",
 

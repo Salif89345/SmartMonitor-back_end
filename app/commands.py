@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.command_security import authorize_device_command
 from app.models import (
     Device,
     DeviceMembership,
@@ -36,11 +37,7 @@ def _send_owner_command(
     current_user: User,
     db: Session,
 ) -> DeviceCommandResponse:
-    """Send one read-only diagnostic command on behalf of a device owner."""
-    enforce_command_rate_limit(
-        current_user.id
-    )
-
+    """Authorize, rate-limit and send one fixed device command."""
     row = db.execute(
         select(
             Device,
@@ -67,12 +64,15 @@ def _send_owner_command(
 
     device, role = row
 
-    if role != "owner":
-        raise HTTPException(
-            status_code=
-                status.HTTP_403_FORBIDDEN,
-            detail="Owner access required",
-        )
+    authorization = authorize_device_command(
+        role=role,
+        device_uid=device.device_uid,
+        command=command,
+    )
+
+    enforce_command_rate_limit(
+        current_user.id
+    )
 
     if not device.mqtt_device_id:
         raise HTTPException(
@@ -88,7 +88,8 @@ def _send_owner_command(
         response = mqtt_manager.send_command(
             mqtt_device_id=
                 device.mqtt_device_id,
-            command=command,
+            authorization=authorization,
+            actor_user_id=current_user.id,
             parameters={},
             timeout=5.0,
         )

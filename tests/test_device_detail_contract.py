@@ -12,6 +12,7 @@ from unittest.mock import (
 )
 
 from app.devices import (
+    DEVICE_OFFLINE_AFTER_SECONDS,
     LIVE_STATE_FRESH_SECONDS,
     build_device_detail_response,
     build_device_list_response,
@@ -162,6 +163,43 @@ class DeviceDetailContractTests(
         self.assertEqual(
             response.availability,
             "online",
+        )
+
+    def test_stale_state_overrides_stuck_online_mqtt_status(
+        self,
+    ):
+        device = make_device()
+
+        stale_received_at = (
+            datetime.now(timezone.utc)
+            - timedelta(
+                seconds=(
+                    DEVICE_OFFLINE_AFTER_SECONDS
+                    + 1
+                )
+            )
+        )
+
+        with (
+            patch(
+                "app.devices.live_state_store.get",
+                return_value=make_live_snapshot(
+                    received_at=stale_received_at
+                ),
+            ),
+            patch(
+                "app.devices.mqtt_manager.get_device_status",
+                return_value="online",
+            ),
+        ):
+            response = build_device_list_response(
+                device,
+                "owner",
+            )
+
+        self.assertEqual(
+            response.availability,
+            "offline",
         )
 
     def test_live_snapshot_is_fresh_when_recent(

@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.alarm_service import acknowledge_alarm
 from app.database import get_db
+from app.device_authorization import (
+    DeviceAction,
+    require_device_action,
+)
 from app.device_live_state import live_state_store
 from app.history_service import (
     DETAILED_HISTORY_MAX_DAYS,
@@ -61,6 +65,11 @@ POWER_TELEMETRY_CHANNEL_KEY = "power_1"
 
 LIVE_STATE_FRESH_SECONDS = 10.0
 
+# Trois publications manquees a la cadence nominale de 5 secondes
+# suffisent pour declarer l'appareil hors ligne. Le statut MQTT retained
+# ne constitue pas, a lui seul, une preuve de vie durable.
+DEVICE_OFFLINE_AFTER_SECONDS = 15.0
+
 
 def _device_availability(
     device: Device,
@@ -74,15 +83,12 @@ def _device_availability(
         )
     )
 
-    if device_status in (
-        "online",
-        "offline",
-    ):
-        return device_status
+    if device_status == "offline":
+        return "offline"
 
-    # Un etat MQTT peut etre momentanement indisponible pendant une
-    # reconnexion du backend. Une telemetrie recue recemment constitue
-    # cependant une preuve positive que l'appareil est en ligne.
+    # Le statut MQTT online peut rester en memoire si le broker ne livre
+    # pas le LWT offline. Une telemetrie recente est donc la preuve de vie
+    # autoritative, y compris apres une reconnexion du backend.
     live_snapshot = live_state_store.get(
         device.mqtt_device_id
     )
@@ -94,8 +100,10 @@ def _device_availability(
     if received_at is not None:
         age_seconds = _age_seconds(received_at)
 
-        if age_seconds <= LIVE_STATE_FRESH_SECONDS:
+        if age_seconds <= DEVICE_OFFLINE_AFTER_SECONDS:
             return "online"
+
+        return "offline"
 
     return "unknown"
 
@@ -1042,6 +1050,11 @@ def get_my_device(
 
     device, role = row
 
+    require_device_action(
+        role,
+        DeviceAction.READ_DEVICE,
+    )
+
     return build_device_detail_response(
         device,
         role,
@@ -1093,11 +1106,10 @@ def _require_owner(
             detail="Device not found",
         )
 
-    if membership.role != "owner":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Owner access required",
-        )
+    require_device_action(
+        membership.role,
+        DeviceAction.MANAGE_MEMBERS,
+    )
 
     return device
 
@@ -1321,6 +1333,11 @@ def list_device_alarms(
             detail="Device not found",
         )
 
+    require_device_action(
+        membership.role,
+        DeviceAction.READ_ALARMS,
+    )
+
     statement = select(AlarmOccurrence).where(
         AlarmOccurrence.device_id == device_id
     )
@@ -1358,6 +1375,11 @@ def acknowledge_device_alarm(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found",
         )
+
+    require_device_action(
+        membership.role,
+        DeviceAction.ACKNOWLEDGE_ALARM,
+    )
 
     occurrence = db.scalar(
         select(AlarmOccurrence).where(
@@ -1421,6 +1443,11 @@ def list_device_events(
             ),
             detail="Device not found",
         )
+
+    require_device_action(
+        membership.role,
+        DeviceAction.READ_EVENTS,
+    )
 
     events = db.scalars(
         select(DeviceEvent)
@@ -1517,9 +1544,10 @@ def get_channel_history(
             ),
         )
 
-    channel = db.execute(
+    row = db.execute(
         select(
-            DeviceChannel
+            DeviceChannel,
+            DeviceMembership.role,
         )
         .join(
             DeviceMembership,
@@ -1536,9 +1564,9 @@ def get_channel_history(
             DeviceMembership.user_id
             == current_user.id,
         )
-    ).scalar_one_or_none()
+    ).first()
 
-    if channel is None:
+    if row is None:
         raise HTTPException(
             status_code=(
                 status.HTTP_404_NOT_FOUND
@@ -1547,6 +1575,13 @@ def get_channel_history(
                 "HISTORY_NOT_FOUND"
             ),
         )
+
+    channel, role = row
+
+    require_device_action(
+        role,
+        DeviceAction.READ_HISTORY,
+    )
 
     if (
         history_duration

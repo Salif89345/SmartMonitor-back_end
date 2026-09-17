@@ -8,12 +8,14 @@ mdp_tests.md
 .env
 .env.*
 !.env.example
+!.env.production.example
 **/Secrets.h
 *.bak
 *.log
 *.key
 *.p12
 *.pfx
+.secrets/
 
 # Outil ponctuel de verification locale
 /verify_op005.py

@@ -7,6 +7,7 @@ from app.measurement_contract import (
 from dotenv import load_dotenv
 
 from app.logging_config import resolve_log_level
+from app.mqtt_security import validate_mqtt_security_config
 
 
 def _split_csv(
@@ -120,6 +121,41 @@ if MQTT_CA_CERT_PATH is not None:
         MQTT_CA_CERT_PATH.strip() or None
     )
 
+MQTT_DEPLOYMENT_ENV = os.getenv(
+    "MQTT_DEPLOYMENT_ENV",
+    "dev",
+).strip().lower()
+
+if MQTT_DEPLOYMENT_ENV not in (
+    "dev",
+    "prod",
+):
+    raise RuntimeError(
+        "MQTT_DEPLOYMENT_ENV must be 'dev' or 'prod'"
+    )
+
+MQTT_ALLOWED_PROD_HOSTS = _split_csv(
+    os.getenv("MQTT_ALLOWED_PROD_HOSTS")
+)
+
+MQTT_CREDENTIAL_ID = os.getenv(
+    "MQTT_CREDENTIAL_ID"
+)
+
+if MQTT_CREDENTIAL_ID is not None:
+    MQTT_CREDENTIAL_ID = (
+        MQTT_CREDENTIAL_ID.strip() or None
+    )
+
+COMMAND_AUTH_KEYS_PATH = os.getenv(
+    "COMMAND_AUTH_KEYS_PATH"
+)
+
+if COMMAND_AUTH_KEYS_PATH is not None:
+    COMMAND_AUTH_KEYS_PATH = (
+        COMMAND_AUTH_KEYS_PATH.strip() or None
+    )
+
 if (
     APP_ENV == "prod"
     and MQTT_TLS_ENABLED
@@ -221,8 +257,16 @@ if APP_ENV == "prod":
         "DB_USER",
         "DB_PASSWORD",
         "MQTT_HOST",
+        "MQTT_PORT",
         "MQTT_USERNAME",
         "MQTT_PASSWORD",
+        "MQTT_CLIENT_ID",
+        "MQTT_TLS_ENABLED",
+        "MQTT_CA_CERT_PATH",
+        "MQTT_DEPLOYMENT_ENV",
+        "MQTT_ALLOWED_PROD_HOSTS",
+        "MQTT_CREDENTIAL_ID",
+        "COMMAND_AUTH_KEYS_PATH",
         "JWT_SECRET_KEY",
         "EMAIL_VERIFICATION_SECRET",
         "RESEND_API_KEY",
@@ -257,3 +301,18 @@ if APP_ENV == "prod":
             "CORS_ALLOWED_ORIGINS cannot contain "
             "'*' in production"
         )
+
+
+validate_mqtt_security_config(
+    app_env=APP_ENV,
+    host=MQTT_HOST,
+    port=MQTT_PORT,
+    username=MQTT_USERNAME,
+    password=MQTT_PASSWORD,
+    client_id=MQTT_CLIENT_ID,
+    tls_enabled=MQTT_TLS_ENABLED,
+    ca_cert_path=MQTT_CA_CERT_PATH,
+    deployment_environment=MQTT_DEPLOYMENT_ENV,
+    allowed_prod_hosts=MQTT_ALLOWED_PROD_HOSTS,
+    credential_id=MQTT_CREDENTIAL_ID,
+)

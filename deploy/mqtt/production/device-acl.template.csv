@@ -1,0 +1,7 @@
+clientid,username,topic,action,access
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/REPLACE_MQTT_DEVICE_ID/command,sub,allow
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/REPLACE_MQTT_DEVICE_ID/state,pub,allow
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/REPLACE_MQTT_DEVICE_ID/status,pub,allow
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/REPLACE_MQTT_DEVICE_ID/outage,pub,allow
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/REPLACE_MQTT_DEVICE_ID/response,pub,allow
+REPLACE_DEVICE_UID,REPLACE_DEVICE_UID,smartmonitor/provisioning/REPLACE_DEVICE_UID/claim-proof,pub,allow

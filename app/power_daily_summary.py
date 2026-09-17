@@ -9,7 +9,7 @@ from datetime import (
 )
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -372,3 +372,51 @@ def summarize_completed_days(
         )
 
     return created_count
+
+
+def rebuild_completed_day_summary(
+    db: Session,
+    *,
+    channel_id: int,
+    summary_date: date,
+    current_local_date: date,
+) -> bool:
+    """Replace a completed-day aggregate after late history arrives.
+
+    The caller owns the transaction. Deleting and recreating the aggregate in
+    the same transaction prevents readers from observing a partial rebuild.
+    """
+
+    if summary_date >= current_local_date:
+        return False
+
+    start_utc, end_utc = _day_utc_bounds(summary_date)
+    measurements = list(
+        db.scalars(
+            select(PowerMeasurement)
+            .where(
+                PowerMeasurement.channel_id == channel_id,
+                PowerMeasurement.measured_at >= start_utc,
+                PowerMeasurement.measured_at < end_utc,
+            )
+            .order_by(PowerMeasurement.measured_at.asc())
+        ).all()
+    )
+
+    db.execute(
+        delete(PowerDailySummary).where(
+            PowerDailySummary.channel_id == channel_id,
+            PowerDailySummary.summary_date == summary_date,
+        )
+    )
+
+    if not measurements:
+        return True
+
+    summary, _ = _build_summary(
+        channel_id=channel_id,
+        summary_date=summary_date,
+        measurements=measurements,
+    )
+    db.add(summary)
+    return True

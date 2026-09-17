@@ -79,6 +79,8 @@ def state_payload_v2(
     return {
         "schema_version": 2,
         "device": "atelier",
+        "mqtt_device_id": "atelier",
+        "device_uid": "SM-A1B2C3D4E5F6",
         "timestamp": timestamp,
         "system": {
             "ntp_synchronized": True

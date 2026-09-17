@@ -2,10 +2,15 @@ import json
 import unittest
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import paho.mqtt.client as mqtt
 
+from app.command_security import (
+    LOCAL_HISTORY_RECOVERY_SERVICE,
+    authorize_device_command,
+    authorize_service_device_command,
+)
 from app.mqtt_client import MqttManager
 from app.mqtt_contract import (
     MqttContractError,
@@ -143,7 +148,12 @@ class MqttContractIntegrationTests(unittest.TestCase):
         manager = self._manager(response)
         result = manager.send_command(
             mqtt_device_id="atelier",
-            command="ping",
+            authorization=authorize_device_command(
+                role="owner",
+                device_uid="SM-A1B2C3D4E5F6",
+                command="ping",
+            ),
+            actor_user_id=32,
             parameters={},
             timeout=0.1,
         )
@@ -152,6 +162,53 @@ class MqttContractIntegrationTests(unittest.TestCase):
         self.assertEqual(manager.client.last_topic, "smartmonitor/atelier/command")
         self.assertEqual(manager.client.last_payload["schema_version"], 1)
         self.assertEqual(result["request_id"], manager.client.last_payload["request_id"])
+
+    def test_internal_history_command_has_an_explicit_service_actor(self):
+        def response(command):
+            return {
+                "schema_version": 1,
+                "request_id": command["request_id"],
+                "result": "ack",
+                "error_code": None,
+                "message": "Page historique restituee",
+                "data": {
+                    "records": [],
+                    "returned_count": 0,
+                    "next_cursor": 7,
+                    "has_more": False,
+                },
+            }
+
+        manager = self._manager(response)
+        with patch(
+            "app.mqtt_client.build_authorized_command_payload",
+            side_effect=lambda **kwargs: {
+                "schema_version": 1,
+                "request_id": kwargs["request_id"],
+                "command": "secure_execute",
+                "parameters": {},
+            },
+        ):
+            result = manager.send_command(
+                mqtt_device_id="atelier",
+                authorization=authorize_service_device_command(
+                    service=LOCAL_HISTORY_RECOVERY_SERVICE,
+                    device_uid="SM-A1B2C3D4E5F6",
+                    command="get_history",
+                ),
+                actor_user_id=None,
+                actor_service=LOCAL_HISTORY_RECOVERY_SERVICE,
+                parameters={"after_sequence": 7, "limit": 2},
+                timeout=0.1,
+            )
+
+        self.assertEqual(result["result"], "ack")
+        event_data = manager._persist_device_event.call_args.kwargs["data"]
+        self.assertEqual(
+            event_data["actor_service"],
+            LOCAL_HISTORY_RECOVERY_SERVICE,
+        )
+        self.assertNotIn("actor_user_id", event_data)
 
     def test_ping_nack_round_trip(self):
         def response(command):
@@ -166,7 +223,12 @@ class MqttContractIntegrationTests(unittest.TestCase):
         manager = self._manager(response)
         result = manager.send_command(
             mqtt_device_id="atelier",
-            command="ping_invalid",
+            authorization=authorize_device_command(
+                role="owner",
+                device_uid="SM-A1B2C3D4E5F6",
+                command="ping",
+            ),
+            actor_user_id=32,
             timeout=0.1,
         )
 
@@ -187,7 +249,12 @@ class MqttContractIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             manager.send_command(
                 mqtt_device_id="atelier",
-                command="ping",
+                authorization=authorize_device_command(
+                    role="owner",
+                    device_uid="SM-A1B2C3D4E5F6",
+                    command="ping",
+                ),
+                actor_user_id=32,
                 timeout=0.1,
             )
 
@@ -208,7 +275,12 @@ class MqttContractIntegrationTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             manager.send_command(
                 mqtt_device_id="atelier",
-                command="ping",
+                authorization=authorize_device_command(
+                    role="owner",
+                    device_uid="SM-A1B2C3D4E5F6",
+                    command="ping",
+                ),
+                actor_user_id=32,
                 timeout=0.01,
             )
 

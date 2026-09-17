@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -301,6 +302,14 @@ class Device(Base):
 
     alarm_occurrences: Mapped[
         list["AlarmOccurrence"]
+    ] = relationship(
+        back_populates="device",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    local_history_records: Mapped[
+        list["LocalHistoryRecord"]
     ] = relationship(
         back_populates="device",
         cascade="all, delete-orphan",
@@ -652,6 +661,68 @@ class PowerDailySummary(Base):
 
     channel: Mapped["DeviceChannel"] = relationship(
         back_populates="daily_summaries",
+    )
+
+
+class LocalHistoryRecord(Base):
+    """Immutable copy of one record exported by the device buffer."""
+
+    __tablename__ = "local_history_records"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id",
+            "sequence",
+            name="uq_local_history_records_device_sequence",
+        ),
+        CheckConstraint(
+            "sequence > 0",
+            name="ck_local_history_records_sequence_positive",
+        ),
+        Index(
+            "ix_local_history_records_device_captured_at",
+            "device_id",
+            "captured_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "devices.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+    )
+
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    record: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    device: Mapped["Device"] = relationship(
+        back_populates="local_history_records",
     )
 
 

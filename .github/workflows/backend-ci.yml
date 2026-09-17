@@ -44,5 +44,11 @@ jobs:
       - name: Validate DEV and PROD log profiles
         run: python tools/check_log_profiles.py
 
+      - name: Validate SM-012-SEC secret hardening
+        run: python tools/check_secret_hardening.py
+
+      - name: Validate SM-062-SEC production broker policy
+        run: python tools/check_production_broker_security.py
+
       - name: Run backend tests
         run: python -m unittest discover -s tests -p "test_*.py"

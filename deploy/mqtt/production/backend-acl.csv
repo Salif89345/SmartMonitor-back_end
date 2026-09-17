@@ -1,0 +1,7 @@
+clientid,username,topic,action,access
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/+/command,pub,allow
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/+/state,sub,allow
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/+/status,sub,allow
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/+/outage,sub,allow
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/+/response,sub,allow
+smartmonitor-backend-prod-primary,smartmonitor-backend-prod,smartmonitor/provisioning/+/claim-proof,sub,allow
