@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import get_db
 from app.command_security import authorize_device_command
+from app.device_transfer_guard import require_active_transfer_access
 from app.models import (
     Device,
     DeviceMembership,
@@ -68,6 +69,10 @@ def _send_owner_command(
         role=role,
         device_uid=device.device_uid,
         command=command,
+    )
+
+    require_active_transfer_access(
+        db, device_id=device.id, user_id=current_user.id, role=role
     )
 
     enforce_command_rate_limit(

@@ -362,6 +362,7 @@ class DeviceMembership(Base):
             postgresql_where=text(
                 "role = 'owner'"
             ),
+            sqlite_where=text("role = 'owner'"),
         ),
     )
 
@@ -509,6 +510,43 @@ class PowerMeasurement(Base):
 
     channel: Mapped["DeviceChannel"] = relationship(
         back_populates="measurements",
+    )
+
+
+class PowerMeasurementAttribution(Base):
+    """Immutable ownership epoch assigned when a measurement is accepted."""
+
+    __tablename__ = "power_measurement_attributions"
+    __table_args__ = (
+        Index(
+            "ix_measurement_attributions_owner_epoch",
+            "owner_user_id",
+            "epoch_transfer_id",
+        ),
+    )
+
+    measurement_id: Mapped[int] = mapped_column(
+        ForeignKey("power_measurements.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    epoch_transfer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("device_transfers.id"),
+        nullable=True,
+    )
+    attributed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -853,4 +891,133 @@ class AlarmOccurrence(Base):
 
     device: Mapped["Device"] = relationship(
         back_populates="alarm_occurrences",
+    )
+
+
+class DeviceResetChallenge(Base):
+    """Single-use reset challenge; never an association nonce."""
+
+    __tablename__ = "device_reset_challenges"
+    __table_args__ = (
+        UniqueConstraint("challenge_digest", name="uq_reset_challenge_digest"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    challenge_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class DeviceTransfer(Base):
+    """Staged ownership change; this model alone never changes rights."""
+
+    __tablename__ = "device_transfers"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id", "reset_generation", name="uq_transfer_reset_generation"
+        ),
+        UniqueConstraint("challenge_id", name="uq_transfer_challenge"),
+        CheckConstraint("reset_generation > 0", name="ck_transfer_generation"),
+        CheckConstraint(
+            "state IN ('pending', 'completed', 'cancelled')",
+            name="ck_transfer_state",
+        ),
+        Index(
+            "uq_device_transfers_one_pending",
+            "device_id",
+            unique=True,
+            postgresql_where=text("state = 'pending'"),
+            sqlite_where=text("state = 'pending'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    previous_owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=False
+    )
+    next_owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=False
+    )
+    challenge_id: Mapped[str] = mapped_column(
+        ForeignKey("device_reset_challenges.id"), nullable=False
+    )
+    reset_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    cause: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    not_before: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    effective_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class DeviceTransferNotice(Base):
+    """Durable in-app notice awaiting an authenticated inbox route."""
+
+    __tablename__ = "device_transfer_notices"
+    __table_args__ = (
+        UniqueConstraint(
+            "transfer_id", "user_id", "phase", name="uq_transfer_notice_phase"
+        ),
+        CheckConstraint(
+            "phase IN ('pending', 'completed')", name="ck_transfer_notice_phase"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    transfer_id: Mapped[int] = mapped_column(
+        ForeignKey("device_transfers.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=False, index=True
+    )
+    phase: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(String(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class DeviceTransferMqttCutover(Base):
+    """Receipt to be written only after the broker cutover is verified."""
+
+    __tablename__ = "device_transfer_mqtt_cutovers"
+    __table_args__ = (
+        UniqueConstraint(
+            "broker_reference", name="uq_transfer_mqtt_cutover_broker_reference"
+        ),
+    )
+
+    transfer_id: Mapped[int] = mapped_column(
+        ForeignKey("device_transfers.id", ondelete="CASCADE"), primary_key=True
+    )
+    device_uid: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_reference: Mapped[str] = mapped_column(
+        String(128), nullable=False
+    )
+    old_access_revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    new_access_verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )

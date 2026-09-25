@@ -63,7 +63,9 @@ class DeviceLiveStateStore:
                     value,
                     received_at,
                 )
-                return value, 0
+                # Une valeur du message courant n'est pas une reprise du cache.
+                # Seules les valeurs de secours doivent forcer « stale ».
+                return value, None
 
             cached = cached_values.get(field_key)
             if cached is None:

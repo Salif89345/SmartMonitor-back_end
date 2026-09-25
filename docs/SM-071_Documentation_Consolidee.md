@@ -13,6 +13,30 @@ geometry:
 fontsize: 10pt
 ---
 
+# Décision de validation du 22 septembre 2026
+
+**SM-071 est validé pour le périmètre fonctionnel de la V1.** Cette décision
+confirme les parcours compte/session, association physique par BLE et Wi-Fi,
+liste et détail des appareils, commandes et diagnostics, droits d'accès,
+reprise après incident et validation verticale décrits ci-dessous. Elle prend
+aussi en compte les validations plus récentes : historique adaptatif et zoom
+(SM-071A, essai sur téléphone), erreurs de commande avec « Réessayer » manuel
+(SM-071C, essai réel) et trois tests de non-régression du cooldown 429. La suite
+Flutter complète compte **80 tests réussis**, avec analyse statique sans erreur.
+
+Cette validation **ne signifie pas que toutes les réserves sont levées** :
+
+- SM-071B, traduction FR/EN, est reporté en V2/V3 ; la V1 reste en français ;
+- le NACK physique volontaire (SM-071-4D), la robustesse physique complète
+  (SM-071-4F-2) et les injections manuelles 502/504 restent reportés ;
+- le transfert de propriété et ses avis relèvent de SM-015-SEC, actuellement
+  suspendu, et ne sont pas inclus dans la présente validation ;
+- l'infrastructure Internet de production relève du jalon distinct SM-072.
+
+Les passages historiques ci-dessous datent du 22 août 2026 ; en cas d'écart
+sur le statut de SM-071A/B/C, cette décision plus récente prévaut. Aucun test
+physique manquant n'est présenté comme réalisé.
+
 # Objet du document
 
 Ce document consolide le travail réalisé dans le cadre de **SM-071** pour SmartMonitor. Il sert de référence technique et de trace de décision pour l'application mobile, le backend FastAPI, PostgreSQL, le broker MQTT et le firmware ESP32.
@@ -40,7 +64,8 @@ Le périmètre consolidé comprend :
 - **SM-071-3** - Liste et détail des appareils ;
 - **SM-071-4** - Commandes, ACK/NACK, diagnostic, sécurité, robustesse et validation verticale.
 
-Ne sont pas considérés comme terminés dans SM-071 :
+Au 22 août 2026, les éléments suivants n'étaient pas considérés comme
+terminés dans SM-071 (voir la décision plus récente ci-dessus) :
 
 - **SM-071A - Historique dans l'APP**, prévu plus tard ;
 - le **broker distant et TLS de production**, qui est l'étape suivante de la roadmap ;
@@ -108,6 +133,9 @@ Ce contexte explique pourquoi le **broker distant + TLS production** reste une �
 
 | Sous-point | Objet | État | Réserve / remarque |
 |---|---|---|---|
+| SM-071A | Historique adaptatif et zoom | VALIDÉ | Essai sur téléphone ; affichage et zoom disponibles dans l'APP |
+| SM-071B | Internationalisation FR/EN | REPORTÉ V2/V3 | V1 francophone |
+| SM-071C | Erreurs et « Réessayer » manuel | VALIDÉ | Essai réel ; aucun retry automatique |
 | SM-071-1 | Compte et session | VALIDÉ | Session, refresh, logout, stockage sécurisé |
 | SM-071-2 | Association / provisioning | VALIDÉ RÉEL E2E | Pairing physique + BLE + Wi-Fi + preuve MQTT + claim backend |
 | SM-071-3 | Liste / détail appareils | VALIDÉ RÉEL | 0 / 1 / plusieurs appareils, owner/member, online/offline, mesures |

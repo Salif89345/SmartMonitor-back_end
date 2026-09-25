@@ -79,6 +79,14 @@ class DeviceLiveStateMultichannelTests(
             ],
             230.0,
         )
+        self.assertEqual(
+            snapshot["energy_channels"]["power_1"]["freshness"],
+            "fresh",
+        )
+        self.assertEqual(
+            snapshot["energy_channels"]["power_2"]["freshness"],
+            "fresh",
+        )
 
     def test_v1_is_exposed_as_power1(
         self,

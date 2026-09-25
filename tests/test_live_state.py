@@ -111,6 +111,9 @@ class LiveStateTests(unittest.TestCase):
             mqtt_device_id=MQTT_DEVICE_ID,
             payload=valid,
         )
+        fresh = store.get(MQTT_DEVICE_ID)
+        self.assertEqual(fresh["sensor_freshness"], "fresh")
+        self.assertEqual(fresh["sensor_age_ms"], 0)
 
         now[0] += timedelta(seconds=5)
         unavailable = base_payload()
@@ -132,6 +135,15 @@ class LiveStateTests(unittest.TestCase):
         self.assertEqual(state["humidity_pct"], 36.4)
         self.assertEqual(state["sensor_freshness"], "stale")
         self.assertEqual(state["sensor_age_ms"], 5000)
+
+        now[0] += timedelta(seconds=1)
+        store.update(
+            mqtt_device_id=MQTT_DEVICE_ID,
+            payload=valid,
+        )
+        recovered = store.get(MQTT_DEVICE_ID)
+        self.assertEqual(recovered["sensor_freshness"], "fresh")
+        self.assertEqual(recovered["sensor_age_ms"], 0)
 
         now[0] += timedelta(seconds=16)
         store.update(

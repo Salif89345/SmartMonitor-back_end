@@ -45,6 +45,11 @@ from app.mqtt_security import build_mqtt_tls_context
 from app.measurement_contract import (
     normalize_electrical_measurement,
 )
+from app.measurement_ownership import (
+    attach_measurement_owner,
+    require_measurement_in_epoch,
+    resolve_owner_epoch,
+)
 from app.settings import (
     COMMAND_AUTH_KEYS_PATH,
     MQTT_CA_CERT_PATH,
@@ -57,6 +62,7 @@ from app.settings import (
     MQTT_USERNAME,
     POWER_HISTORY_INTERVAL_SECONDS,
     MQTT_INGESTION_QUEUE_SIZE,
+    SM015_TRANSFER_STAGING_ENABLED,
 )
 from app.models import (
     Device,
@@ -1292,6 +1298,13 @@ class MqttManager:
         db = SessionLocal()
 
         try:
+            owner_epoch = (
+                resolve_owner_epoch(db, channel_id=channel_id)
+                if SM015_TRANSFER_STAGING_ENABLED
+                else None
+            )
+            if owner_epoch is not None:
+                require_measurement_in_epoch(owner_epoch, measured_at=measured_at)
             measurement = PowerMeasurement(
                 channel_id=channel_id,
 
@@ -1325,6 +1338,12 @@ class MqttManager:
             db.add(
                 measurement
             )
+
+            if owner_epoch is not None:
+                db.flush()
+                attach_measurement_owner(
+                    db, measurement=measurement, epoch=owner_epoch
+                )
 
             db.commit()
 

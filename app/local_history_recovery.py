@@ -31,6 +31,7 @@ from app.power_daily_summary import (
     local_date_for_timestamp,
     rebuild_completed_day_summary,
 )
+from app.settings import SM015_TRANSFER_STAGING_ENABLED
 
 
 logger = logging.getLogger("smartmonitor.history_recovery")
@@ -201,6 +202,13 @@ class LocalHistoryRepository:
     ) -> int:
         if not records:
             return 0
+
+        # Replayed records need a separate, epoch-aware attribution policy.
+        # Until then, never import an unowned measurement in transfer mode.
+        if SM015_TRANSFER_STAGING_ENABLED:
+            raise HistoryRecoveryError(
+                "historical recovery unavailable during ownership-transfer staging"
+            )
 
         db = SessionLocal()
 

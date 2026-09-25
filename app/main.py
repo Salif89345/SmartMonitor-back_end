@@ -16,6 +16,11 @@ from app.auth import router as auth_router
 from app.commands import router as commands_router
 from app.database import check_database_connection
 from app.devices import router as devices_router
+from app.device_transfer_inbox import router as transfer_notices_router
+from app.device_transfer_archive import (
+    archive_index_router,
+    router as transfer_archive_router,
+)
 from app.logging_config import configure_logging
 from app.mqtt_client import mqtt_manager
 from app.settings import (
@@ -23,6 +28,7 @@ from app.settings import (
     APP_ENV,
     CORS_ALLOWED_ORIGINS,
     LOG_LEVEL,
+    SM015_TRANSFER_STAGING_ENABLED,
 )
 
 
@@ -106,6 +112,10 @@ async def unhandled_exception_handler(
 app.include_router(auth_router)
 app.include_router(devices_router)
 app.include_router(commands_router)
+if SM015_TRANSFER_STAGING_ENABLED:
+    app.include_router(transfer_notices_router)
+    app.include_router(transfer_archive_router)
+    app.include_router(archive_index_router)
 
 
 @app.get("/")

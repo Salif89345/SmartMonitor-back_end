@@ -20,6 +20,12 @@ from app.device_authorization import (
     require_device_action,
 )
 from app.device_live_state import live_state_store
+from app.device_transfer_guard import (
+    active_transfer_access_allowed,
+    bounded_history_period,
+    latest_completed_transfer,
+    require_active_transfer_access,
+)
 from app.history_service import (
     DETAILED_HISTORY_MAX_DAYS,
     HISTORY_MAX_DAYS,
@@ -37,6 +43,7 @@ from app.models import (
     DeviceEvent,
     DeviceMembership,
     PowerMeasurement,
+    PowerMeasurementAttribution,
     User,
 )
 from app.schemas import (
@@ -53,6 +60,7 @@ from app.schemas import (
     DeviceHistoryResponse,
     DeviceMemberPublic,
 )
+from app.settings import SM015_TRANSFER_STAGING_ENABLED
 
 
 router = APIRouter(
@@ -69,6 +77,14 @@ LIVE_STATE_FRESH_SECONDS = 10.0
 # suffisent pour declarer l'appareil hors ligne. Le statut MQTT retained
 # ne constitue pas, a lui seul, une preuve de vie durable.
 DEVICE_OFFLINE_AFTER_SECONDS = 15.0
+
+
+def _require_epoch_scoped_events_available(db: Session, device_id: int) -> None:
+    if SM015_TRANSFER_STAGING_ENABLED and latest_completed_transfer(db, device_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Alarm and event archive is not yet owner-scoped",
+        )
 
 
 def _device_availability(
@@ -186,10 +202,9 @@ def build_device_response(
 def build_device_list_response(
     device: Device,
     role: str,
+    hide_prior_snapshot: bool = False,
 ) -> DeviceListPublic:
-    snapshot = _live_state_for_device(
-        device
-    )
+    snapshot = None if hide_prior_snapshot else _live_state_for_device(device)
 
     return DeviceListPublic(
         id=device.id,
@@ -363,11 +378,13 @@ def _build_live_telemetry(
 def _persisted_energy_channel(
     db: Session,
     channel: DeviceChannel,
+    owner_user_id: int | None = None,
+    epoch_transfer_id: int | None = None,
 ) -> tuple[
     EnergyChannelTelemetryPublic,
     PowerMeasurement,
 ] | None:
-    measurement = db.scalar(
+    statement = (
         select(PowerMeasurement)
         .where(
             PowerMeasurement.channel_id
@@ -379,6 +396,19 @@ def _persisted_energy_channel(
         )
         .limit(1)
     )
+    if owner_user_id is not None:
+        statement = statement.join(
+            PowerMeasurementAttribution,
+            PowerMeasurementAttribution.measurement_id == PowerMeasurement.id,
+        ).where(
+            PowerMeasurementAttribution.owner_user_id == owner_user_id,
+            (
+                PowerMeasurementAttribution.epoch_transfer_id.is_(None)
+                if epoch_transfer_id is None
+                else PowerMeasurementAttribution.epoch_transfer_id == epoch_transfer_id
+            ),
+        )
+    measurement = db.scalar(statement)
 
     if measurement is None:
         return None
@@ -431,6 +461,8 @@ def _complete_energy_channels_from_history(
     db: Session,
     channels: list[DeviceChannel],
     telemetry: DeviceTelemetryPublic | None,
+    owner_user_id: int | None = None,
+    epoch_transfer_id: int | None = None,
 ) -> DeviceTelemetryPublic | None:
     energy_channels = dict(
         telemetry.energy_channels or {}
@@ -480,6 +512,8 @@ def _complete_energy_channels_from_history(
         persisted = _persisted_energy_channel(
             db,
             channel,
+            owner_user_id=owner_user_id,
+            epoch_transfer_id=epoch_transfer_id,
         )
 
         if persisted is None:
@@ -583,7 +617,15 @@ def build_device_detail_response(
     device: Device,
     role: str,
     db: Session,
+    owner_user_id: int | None = None,
 ) -> DeviceDetailPublic:
+    if SM015_TRANSFER_STAGING_ENABLED and owner_user_id is None:
+        raise HTTPException(status_code=403, detail="Owner identity required")
+    owner_epoch = (
+        latest_completed_transfer(db, device.id)
+        if SM015_TRANSFER_STAGING_ENABLED
+        else None
+    )
     channels = list(
         db.scalars(
             select(
@@ -611,8 +653,8 @@ def build_device_detail_response(
         None,
     )
 
-    snapshot = _live_state_for_device(
-        device
+    snapshot = (
+        None if owner_epoch is not None else _live_state_for_device(device)
     )
 
     last_state_received_at = (
@@ -621,17 +663,19 @@ def build_device_detail_response(
         )
     )
 
-    telemetry = (
-        _build_live_telemetry(
-            device
-        )
-    )
+    telemetry = None if owner_epoch is not None else _build_live_telemetry(device)
 
     telemetry = (
         _complete_energy_channels_from_history(
             db,
             channels,
             telemetry,
+            owner_user_id=(
+                owner_user_id if SM015_TRANSFER_STAGING_ENABLED else None
+            ),
+            epoch_transfer_id=(
+                owner_epoch.id if owner_epoch is not None else None
+            ),
         )
     )
 
@@ -649,7 +693,7 @@ def build_device_detail_response(
             )
         ).all()
         if isinstance(alarm, AlarmOccurrence)
-    ]
+    ] if owner_epoch is None else []
 
     return DeviceDetailPublic(
         id=device.id,
@@ -731,8 +775,15 @@ def list_my_devices(
         build_device_list_response(
             device,
             role,
+            hide_prior_snapshot=(
+                SM015_TRANSFER_STAGING_ENABLED
+                and latest_completed_transfer(db, device.id) is not None
+            ),
         )
         for device, role in rows
+        if active_transfer_access_allowed(
+            db, device_id=device.id, user_id=current_user.id, role=role
+        )
     ]
 
 
@@ -814,6 +865,9 @@ def claim_device(
             db.flush()
 
         else:
+            require_active_transfer_access(
+                db, device_id=device.id, user_id=current_user.id, role="owner"
+            )
             mqtt_conflict = db.scalar(
                 select(Device).where(
                     Device.mqtt_device_id
@@ -1055,10 +1109,15 @@ def get_my_device(
         DeviceAction.READ_DEVICE,
     )
 
+    require_active_transfer_access(
+        db, device_id=device.id, user_id=current_user.id, role=role
+    )
+
     return build_device_detail_response(
         device,
         role,
         db,
+        owner_user_id=current_user.id,
     )
 
 
@@ -1109,6 +1168,13 @@ def _require_owner(
     require_device_action(
         membership.role,
         DeviceAction.MANAGE_MEMBERS,
+    )
+
+    require_active_transfer_access(
+        db,
+        device_id=device_id,
+        user_id=current_user.id,
+        role=membership.role,
     )
 
     return device
@@ -1338,6 +1404,15 @@ def list_device_alarms(
         DeviceAction.READ_ALARMS,
     )
 
+    require_active_transfer_access(
+        db,
+        device_id=device_id,
+        user_id=current_user.id,
+        role=membership.role,
+    )
+
+    _require_epoch_scoped_events_available(db, device_id)
+
     statement = select(AlarmOccurrence).where(
         AlarmOccurrence.device_id == device_id
     )
@@ -1380,6 +1455,15 @@ def acknowledge_device_alarm(
         membership.role,
         DeviceAction.ACKNOWLEDGE_ALARM,
     )
+
+    require_active_transfer_access(
+        db,
+        device_id=device_id,
+        user_id=current_user.id,
+        role=membership.role,
+    )
+
+    _require_epoch_scoped_events_available(db, device_id)
 
     occurrence = db.scalar(
         select(AlarmOccurrence).where(
@@ -1448,6 +1532,15 @@ def list_device_events(
         membership.role,
         DeviceAction.READ_EVENTS,
     )
+
+    require_active_transfer_access(
+        db,
+        device_id=device_id,
+        user_id=current_user.id,
+        role=membership.role,
+    )
+
+    _require_epoch_scoped_events_available(db, device_id)
 
     events = db.scalars(
         select(DeviceEvent)
@@ -1583,8 +1676,40 @@ def get_channel_history(
         DeviceAction.READ_HISTORY,
     )
 
+    visible_from, visible_to = bounded_history_period(
+        db,
+        device_id=device_id,
+        user_id=current_user.id,
+        role=role,
+        period_from=from_,
+        period_to=to,
+    )
+
+    visible_duration = visible_to - visible_from
+
+    if SM015_TRANSFER_STAGING_ENABLED and role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Shared history unavailable during ownership-transfer staging",
+        )
+
     if (
-        history_duration
+        SM015_TRANSFER_STAGING_ENABLED
+        and visible_duration > timedelta(days=DETAILED_HISTORY_MAX_DAYS)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Owner-specific daily history is not yet available",
+        )
+
+    owner_epoch = (
+        latest_completed_transfer(db, device_id)
+        if SM015_TRANSFER_STAGING_ENABLED
+        else None
+    )
+
+    if (
+        visible_duration
         <= timedelta(
             days=(
                 DETAILED_HISTORY_MAX_DAYS
@@ -1595,9 +1720,15 @@ def get_channel_history(
             build_detailed_history(
                 db=db,
                 channel_id=channel.id,
-                period_from=from_,
-                period_to=to,
+                period_from=visible_from,
+                period_to=visible_to,
                 target_points=target_points,
+                owner_user_id=(
+                    current_user.id if SM015_TRANSFER_STAGING_ENABLED else None
+                ),
+                epoch_transfer_id=(
+                    owner_epoch.id if owner_epoch is not None else None
+                ),
             )
         )
 
@@ -1606,8 +1737,8 @@ def get_channel_history(
             build_daily_history(
                 db=db,
                 channel_id=channel.id,
-                period_from=from_,
-                period_to=to,
+                period_from=visible_from,
+                period_to=visible_to,
                 target_points=target_points,
             )
         )
@@ -1617,8 +1748,8 @@ def get_channel_history(
         channel_id=channel.id,
 
         period={
-            "from": from_,
-            "to": to,
+            "from": visible_from,
+            "to": visible_to,
         },
 
         **history,

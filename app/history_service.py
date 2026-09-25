@@ -2,10 +2,14 @@ from datetime import date, datetime, time, timedelta
 from math import ceil
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, text
+from sqlalchemy import exists, func, select, text
 from sqlalchemy.orm import Session
 
-from app.models import PowerDailySummary, PowerMeasurement
+from app.models import (
+    PowerDailySummary,
+    PowerMeasurement,
+    PowerMeasurementAttribution,
+)
 from app.measurement_contract import (
     DAILY_RESOLUTION_DAYS,
     DETAILED_HISTORY_MAX_DAYS,
@@ -316,6 +320,8 @@ def build_detailed_history(
     period_from: datetime,
     period_to: datetime,
     target_points: int,
+    owner_user_id: int | None = None,
+    epoch_transfer_id: int | None = None,
 ) -> dict[str, object]:
     resolution_seconds = (
         choose_history_resolution_seconds(
@@ -325,6 +331,22 @@ def build_detailed_history(
         )
     )
 
+    owner_filter = ()
+    if owner_user_id is not None:
+        epoch_predicate = (
+            PowerMeasurementAttribution.epoch_transfer_id.is_(None)
+            if epoch_transfer_id is None
+            else PowerMeasurementAttribution.epoch_transfer_id == epoch_transfer_id
+        )
+        owner_filter = (
+            exists()
+            .where(
+                PowerMeasurementAttribution.measurement_id == PowerMeasurement.id,
+                PowerMeasurementAttribution.owner_user_id == owner_user_id,
+                epoch_predicate,
+            ),
+        )
+
     period_filter = (
         PowerMeasurement.channel_id
         == channel_id,
@@ -332,6 +354,7 @@ def build_detailed_history(
         >= period_from,
         PowerMeasurement.measured_at
         < period_to,
+        *owner_filter,
     )
 
     summary_row = db.execute(
@@ -439,6 +462,7 @@ def build_detailed_history(
             PowerMeasurement.energy_kwh.is_not(
                 None
             ),
+            *owner_filter,
         )
     ).scalar_one_or_none()
 

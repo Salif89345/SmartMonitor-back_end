@@ -62,6 +62,12 @@ if APP_ENV == "dev":
     load_dotenv()
 
 
+# Keep the new inbox invisible until its migration is applied deliberately.
+SM015_TRANSFER_STAGING_ENABLED = _parse_bool(
+    "SM015_TRANSFER_STAGING_ENABLED", False
+)
+
+
 LOG_LEVEL = resolve_log_level(
     APP_ENV,
     os.getenv("LOG_LEVEL"),
