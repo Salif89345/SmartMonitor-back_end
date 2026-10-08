@@ -23,6 +23,12 @@ class _Result:
     def scalar_one_or_none(self):
         return None
 
+    def first(self):
+        return None
+
+    def __iter__(self):
+        return iter([])
+
     def all(self):
         return []
 

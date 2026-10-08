@@ -307,6 +307,7 @@ class HistoryMetricSummary(BaseModel):
 
 class HistorySummary(BaseModel):
     consumption_kwh: float | None
+    consumption_partial: bool = False
 
     power_w: HistoryMetricSummary
     voltage_v: HistoryMetricSummary
@@ -316,6 +317,7 @@ class HistorySummary(BaseModel):
 
 
 class HistoryPoint(BaseModel):
+    consumption_partial: bool = False
     bucket_start: datetime
     bucket_end: datetime
     sample_count: int

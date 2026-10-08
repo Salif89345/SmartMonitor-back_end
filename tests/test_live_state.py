@@ -46,6 +46,22 @@ class LiveStateTests(unittest.TestCase):
     def setUp(self):
         self.store = DeviceLiveStateStore()
 
+    def test_daily_energy_keeps_only_meter_data_not_device_tariff(self):
+        payload = base_payload()
+        payload["daily_energy"] = {
+            "ready": True,
+            "date_available": True,
+            "local_date": 20261005,
+            "energy_kwh": 2.5,
+            "tariff_eur_per_kwh": 9.99,
+            "estimated_cost_eur": 24.975,
+        }
+        self.store.update(mqtt_device_id=MQTT_DEVICE_ID, payload=payload)
+        self.assertEqual(
+            self.store.get(MQTT_DEVICE_ID)["daily_energy"],
+            {"local_date": 20261005, "energy_kwh": 2.5},
+        )
+
     def test_snapshot_is_kept_without_ntp(self):
         self.store.update(
             mqtt_device_id=MQTT_DEVICE_ID,

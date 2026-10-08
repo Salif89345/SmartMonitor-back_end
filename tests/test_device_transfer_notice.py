@@ -29,7 +29,12 @@ class DeviceTransferNoticeTests(unittest.TestCase):
     def test_pre_notice_uses_expected_date_not_effective_date(self):
         expected_at = datetime(2026, 9, 21, 10, 47, tzinfo=timezone.utc)
         message = pending_transfer_notice("SM-123", expected_at)
-        self.assertIn("prévu le 21 septembre 2026 à 12h47", message)
+        self.assertIn(
+            "délai minimal d'une minute expire le 21 septembre 2026 à 12h47",
+            message,
+        )
+        self.assertIn("dépend aussi des contrôles de sécurité", message)
+        self.assertNotIn("Date d'effet", message)
         self.assertIn("action physique", message)
         self.assertIn("Ce n'est pas une anomalie logicielle", message)
 

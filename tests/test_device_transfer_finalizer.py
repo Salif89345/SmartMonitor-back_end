@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -9,6 +10,10 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.device_transfer_archive import list_former_owner_archives
 from app.device_transfer_finalizer import complete_due_transfer
+from app.device_transfer_broker_worker import (
+    complete_due_transfer_from_broker,
+    due_transfer_ids,
+)
 from app.device_transfer_store import (
     TransferRejected,
     issue_reset_challenge,
@@ -17,10 +22,12 @@ from app.device_transfer_store import (
 from app.factory_reset_proof import reset_proof_message
 from app.models import (
     Device,
+    DeviceAlarmConfiguration,
     DeviceChannel,
     DeviceMembership,
     DeviceTransfer,
     DeviceTransferMqttCutover,
+    DeviceTransferMqttIdentityCheck,
     DeviceTransferNotice,
     PowerMeasurement,
     PowerMeasurementAttribution,
@@ -35,6 +42,23 @@ KEY = bytes(range(32))
 
 class TransferFinalizerTests(unittest.TestCase):
     def setUp(self):
+        self.identity_verifier = Mock()
+        self.identity_verifier.verify.return_value = True
+        self.stage_flag = patch(
+            "app.device_transfer_store.SM015_TRANSFER_STAGING_ENABLED", True
+        )
+        self.stage_flag.start()
+        self.addCleanup(self.stage_flag.stop)
+        self.transfer_flag = patch(
+            "app.device_transfer_finalizer.SM015_TRANSFER_STAGING_ENABLED", True
+        )
+        self.transfer_flag.start()
+        self.addCleanup(self.transfer_flag.stop)
+        self.worker_flag = patch(
+            "app.device_transfer_broker_worker.SM015_TRANSFER_STAGING_ENABLED", True
+        )
+        self.worker_flag.start()
+        self.addCleanup(self.worker_flag.stop)
         self.engine = create_engine("sqlite+pysqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine, expire_on_commit=False)
@@ -91,13 +115,13 @@ class TransferFinalizerTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    def add_cutover(self, *, device_uid=UID):
-        self.db.add(DeviceTransferMqttCutover(
+    def add_identity_check(self, *, device_uid=UID, mqtt_device_id="bench", verified_at=None):
+        self.db.add(DeviceTransferMqttIdentityCheck(
             transfer_id=self.transfer.id,
             device_uid=device_uid,
-            broker_reference="broker-cutover-test-1",
-            old_access_revoked_at=NOW + timedelta(seconds=20),
-            new_access_verified_at=NOW + timedelta(seconds=30),
+            mqtt_device_id=mqtt_device_id,
+            broker_reference="broker-identity-test-1",
+            verified_at=verified_at or NOW + timedelta(seconds=30),
         ))
         self.db.commit()
 
@@ -106,30 +130,85 @@ class TransferFinalizerTests(unittest.TestCase):
             select(DeviceMembership).where(DeviceMembership.device_id == self.device_id)
         ).all())
 
-    def test_deadline_and_mqtt_cutover_are_both_required(self):
-        with self.assertRaisesRegex(TransferRejected, "credential cutover"):
-            complete_due_transfer(
+    def complete(self, db, **kwargs):
+        return complete_due_transfer(
+            db, identity_verifier=self.identity_verifier, **kwargs
+        )
+
+    def test_deadline_and_mqtt_identity_are_both_required(self):
+        with self.assertRaisesRegex(TransferRejected, "device-scoped MQTT identity"):
+            self.complete(
                 self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
             )
-        self.add_cutover()
+        self.add_identity_check()
         with self.assertRaisesRegex(TransferRejected, "delay not elapsed"):
-            complete_due_transfer(
+            self.complete(
                 self.db, transfer_id=self.transfer.id, now=NOW + timedelta(seconds=59)
             )
         self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
         self.assertEqual({m.user_id for m in self.memberships()}, {self.old_id, self.member_id})
 
+    def test_transfer_remains_disabled_by_default(self):
+        self.add_identity_check()
+        with patch("app.device_transfer_finalizer.SM015_TRANSFER_STAGING_ENABLED", False):
+            with self.assertRaisesRegex(TransferRejected, "ownership transfer is disabled"):
+                self.complete(
+                    self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+                )
+        self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+
+    def test_stored_receipt_alone_never_completes_transfer(self):
+        self.add_identity_check()
+        with self.assertRaisesRegex(TransferRejected, "live broker identity verification"):
+            complete_due_transfer(
+                self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+            )
+        self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+
+    def test_rejected_or_invalid_broker_answer_cannot_change_owner(self):
+        self.add_identity_check()
+        for answer in (False, None, "yes"):
+            self.identity_verifier.verify.return_value = answer
+            with self.assertRaisesRegex(TransferRejected, "live broker identity verification"):
+                self.complete(
+                    self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+                )
+            self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+            self.assertEqual({m.user_id for m in self.memberships()}, {self.old_id, self.member_id})
+
+    def test_broker_failure_rolls_back_without_changing_owner(self):
+        self.add_identity_check()
+        self.identity_verifier.verify.side_effect = ConnectionError("broker unavailable")
+        with self.assertRaisesRegex(ConnectionError, "broker unavailable"):
+            self.complete(
+                self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+            )
+        self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+        self.assertEqual({m.user_id for m in self.memberships()}, {self.old_id, self.member_id})
+
     def test_completion_removes_old_access_preserves_archive_and_is_idempotent(self):
-        self.add_cutover()
+        self.db.add(DeviceAlarmConfiguration(
+            device_id=self.device_id,
+            owner_user_id=self.old_id,
+            rules=[{"id": "previous_owner_rule"}],
+        ))
+        self.db.commit()
+        self.add_identity_check()
         effective = NOW + timedelta(minutes=1)
-        completed = complete_due_transfer(
+        completed = self.complete(
             self.db, transfer_id=self.transfer.id, now=effective
+        )
+        self.identity_verifier.verify.assert_called_once_with(
+            device_uid=UID,
+            mqtt_device_id="bench",
+            broker_reference="broker-identity-test-1",
         )
         self.assertEqual(completed.state, "completed")
         self.assertEqual(completed.effective_at, effective)
         self.assertEqual([(m.user_id, m.role) for m in self.memberships()], [(self.new_id, "owner")])
         self.assertIsNone(self.db.get(Device, self.device_id).name)
         self.assertIsNone(self.db.get(DeviceChannel, self.channel.id).name)
+        self.assertIsNone(self.db.get(DeviceAlarmConfiguration, self.device_id))
         self.assertIsNotNone(self.db.get(PowerMeasurement, self.measurement.id))
         self.assertEqual(
             self.db.get(PowerMeasurementAttribution, self.measurement.id).owner_user_id,
@@ -150,7 +229,7 @@ class TransferFinalizerTests(unittest.TestCase):
         self.assertIn("Salon", next(n.body for n in notices if n.user_id == self.old_id and n.phase == "completed"))
         self.assertNotIn("Salon", next(n.body for n in notices if n.user_id == self.new_id))
 
-        retried = complete_due_transfer(
+        retried = self.complete(
             self.db, transfer_id=self.transfer.id, now=effective + timedelta(minutes=1)
         )
         self.assertEqual(retried.id, completed.id)
@@ -158,16 +237,51 @@ class TransferFinalizerTests(unittest.TestCase):
             select(DeviceTransferNotice).where(DeviceTransferNotice.transfer_id == self.transfer.id)
         ).all())), 3)
 
-    def test_wrong_device_cutover_cannot_complete(self):
-        self.add_cutover(device_uid="SM-OTHER")
-        with self.assertRaisesRegex(TransferRejected, "credential cutover"):
-            complete_due_transfer(
+    def test_wrong_device_identity_cannot_complete(self):
+        self.add_identity_check(device_uid="SM-OTHER")
+        with self.assertRaisesRegex(TransferRejected, "device-scoped MQTT identity"):
+            self.complete(
                 self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
             )
         self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
 
+    def test_wrong_mqtt_identity_cannot_complete(self):
+        self.add_identity_check(mqtt_device_id="other-device")
+        with self.assertRaisesRegex(TransferRejected, "device-scoped MQTT identity"):
+            self.complete(
+                self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+            )
+
+    def test_stale_or_future_identity_check_cannot_complete(self):
+        for checked_at, finalization_at in (
+            (NOW - timedelta(seconds=1), NOW + timedelta(minutes=1)),
+            (NOW + timedelta(minutes=2), NOW + timedelta(minutes=1)),
+            (NOW + timedelta(seconds=30), NOW + timedelta(minutes=3)),
+        ):
+            self.add_identity_check(verified_at=checked_at)
+            with self.assertRaisesRegex(TransferRejected, "device-scoped MQTT identity"):
+                self.complete(
+                    self.db, transfer_id=self.transfer.id, now=finalization_at
+                )
+            self.db.delete(self.db.get(DeviceTransferMqttIdentityCheck, self.transfer.id))
+            self.db.commit()
+
+    def test_legacy_rotation_receipt_cannot_complete_retained_identity_transfer(self):
+        self.db.add(DeviceTransferMqttCutover(
+            transfer_id=self.transfer.id,
+            device_uid=UID,
+            broker_reference="obsolete-cutover-test",
+            old_access_revoked_at=NOW + timedelta(seconds=20),
+            new_access_verified_at=NOW + timedelta(seconds=30),
+        ))
+        self.db.commit()
+        with self.assertRaisesRegex(TransferRejected, "device-scoped MQTT identity"):
+            self.complete(
+                self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
+            )
+
     def test_conflicting_notice_rolls_back_every_ownership_change(self):
-        self.add_cutover()
+        self.add_identity_check()
         self.db.add(DeviceTransferNotice(
             transfer_id=self.transfer.id,
             user_id=self.old_id,
@@ -177,11 +291,79 @@ class TransferFinalizerTests(unittest.TestCase):
         ))
         self.db.commit()
         with self.assertRaisesRegex(TransferRejected, "conflicting transfer completion"):
-            complete_due_transfer(
+            self.complete(
                 self.db, transfer_id=self.transfer.id, now=NOW + timedelta(minutes=1)
             )
         self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
         self.assertEqual({m.user_id for m in self.memberships()}, {self.old_id, self.member_id})
+
+    def test_broker_worker_completes_once_with_fresh_live_attestation(self):
+        self.identity_verifier.attest.return_value = "broker-control-audit-1"
+        effective = NOW + timedelta(minutes=1)
+        self.assertEqual(due_transfer_ids(self.db, now=effective), [self.transfer.id])
+        result = complete_due_transfer_from_broker(
+            self.db, transfer_id=self.transfer.id,
+            attestor=self.identity_verifier, now=effective,
+        )
+        self.assertEqual(result.state, "completed")
+        self.identity_verifier.attest.assert_called_once_with(
+            device_uid=UID, mqtt_device_id="bench"
+        )
+        self.identity_verifier.verify.assert_called_once_with(
+            device_uid=UID, mqtt_device_id="bench",
+            broker_reference="broker-control-audit-1",
+        )
+        self.assertEqual([(m.user_id, m.role) for m in self.memberships()], [(self.new_id, "owner")])
+        self.assertEqual(due_transfer_ids(self.db, now=effective), [])
+        complete_due_transfer_from_broker(
+            self.db, transfer_id=self.transfer.id,
+            attestor=self.identity_verifier, now=effective + timedelta(minutes=1),
+        )
+        self.identity_verifier.attest.assert_called_once()
+        notices = list(self.db.scalars(
+            select(DeviceTransferNotice).where(DeviceTransferNotice.transfer_id == self.transfer.id)
+        ))
+        self.assertEqual(len(notices), 3)
+
+    def test_broker_worker_never_attests_before_delay_or_without_adapter(self):
+        self.identity_verifier.attest.return_value = "broker-control-audit-2"
+        with self.assertRaisesRegex(TransferRejected, "delay not elapsed"):
+            complete_due_transfer_from_broker(
+                self.db, transfer_id=self.transfer.id,
+                attestor=self.identity_verifier, now=NOW + timedelta(seconds=59),
+            )
+        self.identity_verifier.attest.assert_not_called()
+        self.assertEqual(due_transfer_ids(self.db, now=NOW + timedelta(seconds=59)), [])
+        with self.assertRaisesRegex(TransferRejected, "trusted broker attestor required"):
+            complete_due_transfer_from_broker(
+                self.db, transfer_id=self.transfer.id,
+                attestor=None, now=NOW + timedelta(minutes=1),
+            )
+        self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+
+    def test_broker_worker_rejection_rolls_back_receipt_and_access(self):
+        effective = NOW + timedelta(minutes=1)
+        for reference, answer in ((None, True), ("client-says-ok", False), ("bad\nref", True)):
+            self.identity_verifier.attest.return_value = reference
+            self.identity_verifier.verify.return_value = answer
+            with self.assertRaises(TransferRejected):
+                complete_due_transfer_from_broker(
+                    self.db, transfer_id=self.transfer.id,
+                    attestor=self.identity_verifier, now=effective,
+                )
+            self.assertIsNone(self.db.get(DeviceTransferMqttIdentityCheck, self.transfer.id))
+            self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
+            self.assertEqual({m.user_id for m in self.memberships()}, {self.old_id, self.member_id})
+
+    def test_broker_worker_control_plane_outage_keeps_transfer_pending(self):
+        self.identity_verifier.attest.side_effect = ConnectionError("control plane unavailable")
+        with self.assertRaisesRegex(ConnectionError, "control plane unavailable"):
+            complete_due_transfer_from_broker(
+                self.db, transfer_id=self.transfer.id,
+                attestor=self.identity_verifier, now=NOW + timedelta(minutes=1),
+            )
+        self.assertIsNone(self.db.get(DeviceTransferMqttIdentityCheck, self.transfer.id))
+        self.assertEqual(self.db.get(DeviceTransfer, self.transfer.id).state, "pending")
 
 
 if __name__ == "__main__":

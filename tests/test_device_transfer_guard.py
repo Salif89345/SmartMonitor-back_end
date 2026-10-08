@@ -29,6 +29,11 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
 class TransferGuardTests(unittest.TestCase):
     def setUp(self):
+        self.stage_flag = patch(
+            "app.device_transfer_store.SM015_TRANSFER_STAGING_ENABLED", True
+        )
+        self.stage_flag.start()
+        self.addCleanup(self.stage_flag.stop)
         self.engine = create_engine("sqlite+pysqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine, expire_on_commit=False)

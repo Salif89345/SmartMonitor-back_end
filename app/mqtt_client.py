@@ -16,6 +16,7 @@ from app.command_security import (
     AuthorizedDeviceCommand,
     CommandRisk,
     LOCAL_HISTORY_RECOVERY_SERVICE,
+    SERVICE_COMMAND_ALLOWLIST,
     authorize_service_device_command,
     build_authorized_command_payload,
 )
@@ -27,6 +28,7 @@ from app.device_identity import (
 )
 from app.device_events import create_device_event_by_mqtt_id
 from app.alarm_service import ingest_alarm_snapshot
+from app.alarm_rule_recovery import AlarmRuleRecoveryCoordinator
 from app.device_live_state import live_state_store
 from app.ingestion_cache import (
     PowerChannelState,
@@ -152,6 +154,9 @@ class MqttManager:
 
         self._history_recovery = LocalHistoryRecoveryCoordinator(
             command_sender=self._send_history_recovery_command,
+        )
+        self._alarm_rule_recovery = AlarmRuleRecoveryCoordinator(
+            command_sender=self.send_command,
         )
 
         self.client = mqtt.Client(
@@ -1687,6 +1692,12 @@ class MqttManager:
 
             return
 
+        self._alarm_rule_recovery.schedule(
+            mqtt_device_id=mqtt_device_id,
+            device_uid=payload.get("device_uid"),
+            boot_count=system.get("boot_count"),
+        )
+
         if (
             system.get(
                 "ntp_synchronized"
@@ -1892,6 +1903,7 @@ class MqttManager:
 
         self._start_ingestion_worker()
         self._history_recovery.start()
+        self._alarm_rule_recovery.start()
 
         self.client.connect_async(
             MQTT_HOST,
@@ -1902,6 +1914,7 @@ class MqttManager:
         self.client.loop_start()
 
     def stop(self):
+        self._alarm_rule_recovery.stop()
         self._history_recovery.stop()
         self.client.disconnect()
         self.client.loop_stop()
@@ -1949,7 +1962,7 @@ class MqttManager:
         )
         has_service_actor = (
             isinstance(actor_service, str)
-            and actor_service == LOCAL_HISTORY_RECOVERY_SERVICE
+            and actor_service in SERVICE_COMMAND_ALLOWLIST
         )
 
         if has_user_actor == has_service_actor:
@@ -1959,10 +1972,7 @@ class MqttManager:
 
         command = authorization.command
 
-        if has_service_actor and command not in (
-            "get_history",
-            "ack_history",
-        ):
+        if has_service_actor and command not in SERVICE_COMMAND_ALLOWLIST[actor_service]:
             raise ValueError(
                 "Service actor is not authorized for this command"
             )

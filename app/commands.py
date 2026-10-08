@@ -1,3 +1,5 @@
+import re
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -6,6 +8,7 @@ from fastapi import (
 )
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -32,11 +35,17 @@ router = APIRouter(
 )
 
 
+class RestartCommandRequest(BaseModel):
+    confirmation: str
+
+
 def _send_owner_command(
     device_id: int,
     command: str,
     current_user: User,
     db: Session,
+    confirmation: str | None = None,
+    parameters: dict | None = None,
 ) -> DeviceCommandResponse:
     """Authorize, rate-limit and send one fixed device command."""
     row = db.execute(
@@ -69,6 +78,7 @@ def _send_owner_command(
         role=role,
         device_uid=device.device_uid,
         command=command,
+        confirmation=confirmation,
     )
 
     require_active_transfer_access(
@@ -95,7 +105,7 @@ def _send_owner_command(
                 device.mqtt_device_id,
             authorization=authorization,
             actor_user_id=current_user.id,
-            parameters={},
+            parameters=parameters if parameters is not None else {},
             timeout=5.0,
         )
 
@@ -174,4 +184,70 @@ def get_status_device(
         command="get_status",
         current_user=current_user,
         db=db,
+    )
+
+
+@router.post(
+    "/{device_id}/commands/get_config",
+    response_model=DeviceCommandResponse,
+)
+def get_config_device(
+    device_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Expose only the non-secret fields in the device configuration reply."""
+    response = _send_owner_command(
+        device_id=device_id,
+        command="get_config",
+        current_user=current_user,
+        db=db,
+    )
+    if response.result == "nack":
+        response.data = None
+        response.message = "Lecture de configuration refusée"
+        if not isinstance(response.error_code, str) or not re.fullmatch(
+            r"[a-z0-9_]{1,64}", response.error_code
+        ):
+            response.error_code = "configuration_rejected"
+        return response
+
+    data = response.data
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("device"), str)
+        or not re.fullmatch(r"[a-z0-9_-]{1,31}", data["device"])
+        or data.get("schema_version") != 1
+        or type(data.get("schema_version")) is not int
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid device configuration response",
+        )
+
+    response.data = {
+        "device": data["device"],
+        "schema_version": data["schema_version"],
+    }
+    response.message = "Configuration récupérée"
+    return response
+
+
+@router.post(
+    "/{device_id}/commands/restart",
+    response_model=DeviceCommandResponse,
+)
+def restart_device(
+    device_id: int,
+    request: RestartCommandRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Restart one owned device after device-bound confirmation."""
+    return _send_owner_command(
+        device_id=device_id,
+        command="restart",
+        current_user=current_user,
+        db=db,
+        confirmation=request.confirmation,
     )

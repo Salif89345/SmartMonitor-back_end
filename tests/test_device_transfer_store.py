@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -30,6 +31,11 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
 class DeviceTransferStoreTests(unittest.TestCase):
     def setUp(self):
+        self.transfer_flag = patch(
+            "app.device_transfer_store.SM015_TRANSFER_STAGING_ENABLED", True
+        )
+        self.transfer_flag.start()
+        self.addCleanup(self.transfer_flag.stop)
         self.engine = create_engine("sqlite+pysqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.db = Session(self.engine, expire_on_commit=False)
@@ -123,9 +129,8 @@ class DeviceTransferStoreTests(unittest.TestCase):
 
     def test_second_request_is_blocked_while_one_is_pending(self):
         stage_verified_transfer(self.db, **self._valid_request())
-        second = self._valid_request(generation=3, now=NOW + timedelta(seconds=10))
-        with self.assertRaises(TransferRejected):
-            stage_verified_transfer(self.db, **second)
+        with self.assertRaisesRegex(TransferRejected, "transfer already pending"):
+            self._valid_request(generation=3, now=NOW + timedelta(seconds=10))
         self.assertEqual(self.db.scalar(select(func_count(DeviceTransfer))), 1)
         self.assertEqual(self.db.scalar(select(func_count(DeviceTransferNotice))), 1)
 
@@ -163,6 +168,11 @@ class DeviceTransferStoreTests(unittest.TestCase):
         with self.assertRaises(TransferRejected):
             stage_verified_transfer(self.db, **args)
 
+    def test_only_one_active_challenge_per_device(self):
+        issue_reset_challenge(self.db, device_uid=UID, now=NOW)
+        with self.assertRaisesRegex(TransferRejected, "challenge already active"):
+            issue_reset_challenge(self.db, device_uid=UID, now=NOW + timedelta(seconds=1))
+
     def test_same_or_unverified_owner_is_rejected(self):
         args = self._valid_request()
         args["next_owner_user_id"] = self.old_owner_id
@@ -173,6 +183,17 @@ class DeviceTransferStoreTests(unittest.TestCase):
         self.db.commit()
         with self.assertRaises(TransferRejected):
             stage_verified_transfer(self.db, **args)
+
+    def test_disabled_flag_blocks_challenge_and_staging_without_writes(self):
+        args = self._valid_request()
+        with patch("app.device_transfer_store.SM015_TRANSFER_STAGING_ENABLED", False):
+            with self.assertRaisesRegex(TransferRejected, "ownership transfer is disabled"):
+                issue_reset_challenge(self.db, device_uid=UID, now=NOW)
+            with self.assertRaisesRegex(TransferRejected, "ownership transfer is disabled"):
+                stage_verified_transfer(self.db, **args)
+        self.assertEqual(self.db.scalar(select(func_count(DeviceResetChallenge))), 1)
+        self.assertEqual(self.db.scalar(select(func_count(DeviceTransfer))), 0)
+        self.assertEqual(self.db.scalar(select(func_count(DeviceTransferNotice))), 0)
 
 
 def func_count(model):

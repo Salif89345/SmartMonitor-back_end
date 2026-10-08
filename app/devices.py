@@ -24,6 +24,7 @@ from app.device_transfer_guard import (
     active_transfer_access_allowed,
     bounded_history_period,
     latest_completed_transfer,
+    pending_transfer,
     require_active_transfer_access,
 )
 from app.history_service import (
@@ -865,9 +866,11 @@ def claim_device(
             db.flush()
 
         else:
-            require_active_transfer_access(
-                db, device_id=device.id, user_id=current_user.id, role="owner"
-            )
+            if pending_transfer(db, device.id) is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Device transfer pending",
+                )
             mqtt_conflict = db.scalar(
                 select(Device).where(
                     Device.mqtt_device_id
@@ -917,6 +920,11 @@ def claim_device(
                 detail=(
                     "Device already has an owner"
                 ),
+            )
+
+        if owner is not None:
+            require_active_transfer_access(
+                db, device_id=device.id, user_id=current_user.id, role="owner"
             )
 
         current_membership = db.scalar(

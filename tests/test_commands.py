@@ -43,6 +43,7 @@ class CommandRouteTests(TestCase):
         command="ping",
         row=_DEFAULT_ROW,
         error=None,
+        confirmation=None,
     ):
         rate_limit = Mock()
 
@@ -65,6 +66,7 @@ class CommandRouteTests(TestCase):
                     if row is _DEFAULT_ROW
                     else row
                 ),
+                confirmation=confirmation,
             )
 
         return result, send_command, rate_limit
@@ -95,6 +97,128 @@ class CommandRouteTests(TestCase):
 
         self.assertEqual(result.result, "nack")
         self.assertEqual(result.error_code, "device_busy")
+
+    def test_restart_requires_device_bound_confirmation(self):
+        with self.assertRaises(HTTPException) as missing:
+            self._send(command="restart")
+        self.assertEqual(missing.exception.status_code, 428)
+
+        with self.assertRaises(HTTPException) as wrong:
+            self._send(
+                command="restart",
+                confirmation="restart:SM-000000000000",
+            )
+        self.assertEqual(wrong.exception.status_code, 428)
+
+        _, sent, _ = self._send(
+            command="restart",
+            confirmation="restart:SM-A1B2C3D4E5F6",
+        )
+        self.assertEqual(
+            sent.call_args.kwargs["authorization"].command,
+            "restart",
+        )
+
+    def test_member_cannot_restart_with_valid_confirmation(self):
+        with self.assertRaises(HTTPException) as denied:
+            self._send(
+                command="restart",
+                row=(self.device, "member"),
+                confirmation="restart:SM-A1B2C3D4E5F6",
+            )
+        self.assertEqual(denied.exception.status_code, 403)
+
+    def test_restart_route_passes_confirmation_to_owner_guard(self):
+        request = commands.RestartCommandRequest(
+            confirmation="restart:SM-A1B2C3D4E5F6",
+        )
+        with patch.object(
+            commands,
+            "_send_owner_command",
+            return_value=self.response,
+        ) as guarded_send:
+            commands.restart_device(
+                device_id=7,
+                request=request,
+                current_user=self.user,
+                db=_Database((self.device, "owner")),
+            )
+        self.assertEqual(
+            guarded_send.call_args.kwargs["confirmation"],
+            request.confirmation,
+        )
+        self.assertEqual(
+            guarded_send.call_args.kwargs["command"],
+            "restart",
+        )
+
+    def test_get_config_exposes_only_non_secret_fields(self):
+        self.response["data"] = {
+            "device": "atelier",
+            "schema_version": 1,
+            "wifi_password": "must-not-leak",
+            "mqtt_password": "must-not-leak",
+        }
+        with patch.object(
+            commands.mqtt_manager,
+            "send_command",
+            return_value=self.response,
+        ):
+            response = commands.get_config_device(
+                device_id=7,
+                current_user=self.user,
+                db=_Database((self.device, "owner")),
+            )
+        self.assertEqual(response.data, {"device": "atelier", "schema_version": 1})
+        self.assertEqual(response.message, "Configuration récupérée")
+
+    def test_get_config_refuses_member_before_publish(self):
+        with patch.object(commands.mqtt_manager, "send_command") as publish:
+            with self.assertRaises(HTTPException) as raised:
+                commands.get_config_device(
+                    device_id=7,
+                    current_user=self.user,
+                    db=_Database((self.device, "member")),
+                )
+        self.assertEqual(raised.exception.status_code, 403)
+        publish.assert_not_called()
+
+    def test_get_config_rejects_malformed_ack(self):
+        self.response["data"] = {"mqtt_password": "must-not-leak"}
+        with patch.object(
+            commands.mqtt_manager,
+            "send_command",
+            return_value=self.response,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                commands.get_config_device(
+                    device_id=7,
+                    current_user=self.user,
+                    db=_Database((self.device, "owner")),
+                )
+        self.assertEqual(raised.exception.status_code, 502)
+
+    def test_get_config_nack_does_not_expose_device_text(self):
+        self.response.update(
+            result="nack",
+            message="secret from device",
+            error_code="invalid_parameters",
+            data={"wifi_password": "must-not-leak"},
+        )
+        with patch.object(
+            commands.mqtt_manager,
+            "send_command",
+            return_value=self.response,
+        ):
+            response = commands.get_config_device(
+                device_id=7,
+                current_user=self.user,
+                db=_Database((self.device, "owner")),
+            )
+        self.assertEqual(response.result, "nack")
+        self.assertEqual(response.error_code, "invalid_parameters")
+        self.assertEqual(response.message, "Lecture de configuration refusée")
+        self.assertIsNone(response.data)
 
     def test_member_is_refused_before_rate_limit_and_publish(self):
         rate_limit = Mock()

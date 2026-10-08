@@ -39,8 +39,9 @@ def pending_transfer_notice(device_label: str, expected_at: datetime) -> str:
     return (
         f"Une action physique sur l'appareil {_device_label(device_label)} "
         "a déclenché une demande de réassociation. "
-        "Son retrait de votre compte est prévu le "
+        "Le délai minimal d'une minute expire le "
         f"{_local_effective_date(expected_at)}. "
+        "Le retrait de votre compte dépend aussi des contrôles de sécurité. "
         "Ce n'est pas une anomalie logicielle."
     )
 

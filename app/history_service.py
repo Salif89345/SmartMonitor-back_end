@@ -1,9 +1,11 @@
-from datetime import date, datetime, time, timedelta
-from math import ceil
+from datetime import date, datetime, time, timedelta, timezone
+from math import ceil, fsum
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import exists, func, select, text
 from sqlalchemy.orm import Session
+from app.energy_consumption import consumption_buckets
+from app.settings import POWER_HISTORY_INTERVAL_SECONDS
 
 from app.models import (
     PowerDailySummary,
@@ -449,63 +451,37 @@ def build_detailed_history(
         )
     ).one()
 
-    baseline_energy = db.execute(
-        select(
-            func.max(
-                PowerMeasurement.energy_kwh
-            )
-        ).where(
-            PowerMeasurement.channel_id
-            == channel_id,
-            PowerMeasurement.measured_at
-            < period_from,
-            PowerMeasurement.energy_kwh.is_not(
-                None
-            ),
+    # Latest chronological reading, scoped to the same owner/transfer epoch.
+    # A historical maximum is not a valid baseline after a counter replacement.
+    baseline = db.execute(
+        select(PowerMeasurement.measured_at, PowerMeasurement.energy_kwh)
+        .where(
+            PowerMeasurement.channel_id == channel_id,
+            PowerMeasurement.measured_at < period_from,
             *owner_filter,
         )
-    ).scalar_one_or_none()
-
-    first_period_energy = db.execute(
-        select(
-            PowerMeasurement.energy_kwh
-        )
-        .where(
-            *period_filter,
-            PowerMeasurement.energy_kwh.is_not(
-                None
-            ),
-        )
-        .order_by(
-            PowerMeasurement.measured_at.asc()
-        )
+        .order_by(PowerMeasurement.measured_at.desc())
         .limit(1)
-    ).scalar_one_or_none()
+    ).first()
 
-    energy_reference = _to_float(
-        baseline_energy
+    measurements = db.execute(
+        select(PowerMeasurement.measured_at, PowerMeasurement.energy_kwh)
+        .where(*period_filter)
+        .order_by(PowerMeasurement.measured_at.asc())
+        .execution_options(yield_per=2000)
     )
-
-    if energy_reference is None:
-        energy_reference = _to_float(
-            first_period_energy
-        )
-
-    max_period_energy = _to_float(
-        summary_row.max_energy_kwh
+    consumption, consumption_partial, period_partial = consumption_buckets(
+        measurements,
+        period_from=period_from,
+        period_to=period_to,
+        resolution_seconds=resolution_seconds,
+        max_gap_seconds=3 * POWER_HISTORY_INTERVAL_SECONDS,
+        baseline=baseline,
     )
-
-    if (
-        energy_reference is None
-        or max_period_energy is None
-    ):
-        total_consumption_kwh = None
-    else:
-        total_consumption_kwh = max(
-            0.0,
-            max_period_energy
-            - energy_reference,
-        )
+    known_consumption = [v for v in consumption.values() if v is not None]
+    total_consumption_kwh = (
+        round(fsum(known_consumption), 12) if known_consumption else None
+    )
 
     interval_sql = text(
         "INTERVAL "
@@ -589,112 +565,13 @@ def build_detailed_history(
         seconds=resolution_seconds
     )
 
-    running_energy_reference = (
-        energy_reference
-    )
-
-    energy_reference_contiguous = (
-        running_energy_reference
-        is not None
-    )
-
-    previous_bucket_start = None
     points = []
 
     for row in bucket_rows:
-        bucket_start = (
-            row.bucket_start
-        )
-
-        bucket_end = min(
-            bucket_start
-            + bucket_duration,
-            period_to,
-        )
-
-        if previous_bucket_start is None:
-            if bucket_start > period_from:
-                energy_reference_contiguous = (
-                    False
-                )
-
-        else:
-            expected_bucket_start = (
-                previous_bucket_start
-                + bucket_duration
-            )
-
-            if (
-                bucket_start
-                > expected_bucket_start
-            ):
-                energy_reference_contiguous = (
-                    False
-                )
-
-        energy_sample_count = int(
-            row.energy_sample_count
-        )
-
-        bucket_max_energy = _to_float(
-            row.max_energy_kwh
-        )
-
-        bucket_consumption_kwh = None
-
-        if (
-            energy_sample_count <= 0
-            or bucket_max_energy is None
-        ):
-            energy_reference_contiguous = (
-                False
-            )
-
-        elif running_energy_reference is None:
-            running_energy_reference = (
-                bucket_max_energy
-            )
-
-            energy_reference_contiguous = (
-                True
-            )
-
-        elif not energy_reference_contiguous:
-            # Première tranche après un trou :
-            # on ne lui attribue pas la
-            # consommation du trou précédent.
-            bucket_consumption_kwh = None
-
-            if (
-                bucket_max_energy
-                >= running_energy_reference
-            ):
-                running_energy_reference = (
-                    bucket_max_energy
-                )
-
-            energy_reference_contiguous = (
-                True
-            )
-
-        elif (
-            bucket_max_energy
-            >= running_energy_reference
-        ):
-            bucket_consumption_kwh = max(
-                0.0,
-                bucket_max_energy
-                - running_energy_reference,
-            )
-
-            running_energy_reference = (
-                bucket_max_energy
-            )
-
-        else:
-            # Diminution anormale du compteur :
-            # dernière référence valide conservée.
-            bucket_consumption_kwh = 0.0
+        bucket_start = row.bucket_start
+        bucket_end = min(bucket_start + bucket_duration, period_to)
+        bucket_key = bucket_start.astimezone(timezone.utc)
+        bucket_consumption_kwh = consumption.get(bucket_key)
 
         points.append(
             {
@@ -725,11 +602,8 @@ def build_detailed_history(
                 "consumption_kwh": (
                     bucket_consumption_kwh
                 ),
+                "consumption_partial": consumption_partial.get(bucket_key, True),
             }
-        )
-
-        previous_bucket_start = (
-            bucket_start
         )
 
     return {
@@ -748,6 +622,7 @@ def build_detailed_history(
             "consumption_kwh": (
                 total_consumption_kwh
             ),
+            "consumption_partial": period_partial,
 
             "power_w": _metric_summary(
                 summary_row,

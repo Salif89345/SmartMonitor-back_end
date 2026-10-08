@@ -2,8 +2,9 @@
 
 This stores a one-use reset challenge, a timed transfer request and the old
 owner's in-app pre-notice. It deliberately does NOT change memberships or
-enable controls: factory-key custody, MQTT revocation and per-owner history
-isolation must exist before a real transfer may be completed.
+enable controls: trusted factory-key custody, broker verification of the
+retained device-scoped MQTT identity and per-owner history isolation must
+exist before a real transfer may be completed.
 """
 
 import hashlib
@@ -23,6 +24,7 @@ from app.device_transfer_notice import (
     pending_transfer_notice,
 )
 from app.factory_reset_proof import verify_reset_proof
+from app.settings import SM015_TRANSFER_STAGING_ENABLED
 from app.models import (
     Device,
     DeviceMembership,
@@ -61,17 +63,43 @@ def _db_utc(value: datetime) -> datetime:
 
 
 def issue_reset_challenge(
-    db: Session, *, device_uid: str, now: datetime | None = None
+    db: Session,
+    *,
+    device_uid: str,
+    requested_by_user_id: int | None = None,
+    now: datetime | None = None,
 ) -> IssuedResetChallenge:
     """Internal only; do not expose until the production enrollment is ready."""
+    if not SM015_TRANSFER_STAGING_ENABLED:
+        raise TransferRejected("ownership transfer is disabled")
     current = _now_utc(now)
-    device = db.scalar(select(Device).where(Device.device_uid == device_uid))
+    device = db.scalar(
+        select(Device).where(Device.device_uid == device_uid).with_for_update()
+    )
     if device is None:
         raise TransferRejected("device not registered")
+    pending = db.scalar(
+        select(DeviceTransfer.id).where(
+            DeviceTransfer.device_id == device.id,
+            DeviceTransfer.state == "pending",
+        )
+    )
+    if pending is not None:
+        raise TransferRejected("transfer already pending")
+    active_challenge = db.scalar(
+        select(DeviceResetChallenge.id).where(
+            DeviceResetChallenge.device_id == device.id,
+            DeviceResetChallenge.consumed_at.is_(None),
+            DeviceResetChallenge.expires_at > current,
+        )
+    )
+    if active_challenge is not None:
+        raise TransferRejected("reset challenge already active")
     challenge_hex = secrets.token_hex(32).upper()
     challenge = DeviceResetChallenge(
         id=str(uuid4()),
         device_id=device.id,
+        requested_by_user_id=requested_by_user_id,
         challenge_digest=hashlib.sha256(bytes.fromhex(challenge_hex)).hexdigest(),
         created_at=current,
         expires_at=current + CHALLENGE_LIFETIME,
@@ -103,6 +131,8 @@ def stage_verified_transfer(
     from the requesting user or an API payload. No caller currently invokes
     this function from a public route.
     """
+    if not SM015_TRANSFER_STAGING_ENABLED:
+        raise TransferRejected("ownership transfer is disabled")
     current = _now_utc(now)
     try:
         device = db.scalar(
@@ -161,6 +191,11 @@ def stage_verified_transfer(
             or _db_utc(challenge.expires_at) <= current
         ):
             raise TransferRejected("reset challenge expired or used")
+        if (
+            challenge.requested_by_user_id is not None
+            and challenge.requested_by_user_id != next_owner_user_id
+        ):
+            raise TransferRejected("reset challenge belongs to another account")
         try:
             supplied_digest = hashlib.sha256(
                 bytes.fromhex(challenge_hex)

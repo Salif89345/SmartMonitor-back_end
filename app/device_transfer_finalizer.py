@@ -1,10 +1,11 @@
-"""Atomic backend ownership switch after a trusted MQTT cutover receipt.
+"""Atomic ownership switch after a trusted retained-MQTT-identity check.
 
 There is deliberately no public route or scheduler here. The current shared
-prototype MQTT account cannot produce the required per-device cutover receipt.
+prototype MQTT account cannot produce the required per-device broker receipt.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,13 +19,35 @@ from app.device_transfer_notice import (
 from app.device_transfer_store import TransferRejected
 from app.models import (
     Device,
+    DeviceAlarmConfiguration,
     DeviceChannel,
     DeviceMembership,
     DeviceTransfer,
-    DeviceTransferMqttCutover,
+    DeviceTransferMqttIdentityCheck,
     DeviceTransferNotice,
     User,
 )
+from app.settings import SM015_TRANSFER_STAGING_ENABLED
+
+
+MAX_IDENTITY_CHECK_AGE = timedelta(minutes=2)
+
+
+class RetainedMqttIdentityVerifier(Protocol):
+    """Trusted adapter that checks broker-side auth and device-scoped ACLs.
+
+    Its answer must come from an authenticated broker control plane, never
+    from an MQTT payload or a client-supplied declaration. No production
+    adapter exists yet, so the default finalization path fails closed.
+    """
+
+    def verify(
+        self,
+        *,
+        device_uid: str,
+        mqtt_device_id: str,
+        broker_reference: str,
+    ) -> bool: ...
 
 
 def _utc(value: datetime) -> datetime:
@@ -35,14 +58,22 @@ def _utc(value: datetime) -> datetime:
 
 
 def complete_due_transfer(
-    db: Session, *, transfer_id: int, now: datetime | None = None
+    db: Session,
+    *,
+    transfer_id: int,
+    identity_verifier: RetainedMqttIdentityVerifier | None = None,
+    now: datetime | None = None,
 ) -> DeviceTransfer:
-    """Switch rights once, only after the 1-minute deadline and broker cutover.
+    """Switch rights once, only after the deadline and broker identity check.
 
-    The broker worker must first revoke the old device credential, verify the
-    new individual credential, then write DeviceTransferMqttCutover. A failed
-    database commit leaves the request pending for an idempotent retry.
+    A trusted broker worker must verify that the retained credential is unique
+    to this device and that its topic ACL is device-scoped. The stored check
+    is only an audit receipt, not proof by itself. No production verifier is
+    enabled yet. A failed commit leaves the request pending for a safe retry.
     """
+    if not SM015_TRANSFER_STAGING_ENABLED:
+        raise TransferRejected("ownership transfer is disabled")
+
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -92,17 +123,27 @@ def complete_due_transfer(
         if current < _utc(transfer.not_before):
             raise TransferRejected("transfer delay not elapsed")
 
-        cutover = db.get(DeviceTransferMqttCutover, transfer.id)
+        identity_check = db.get(DeviceTransferMqttIdentityCheck, transfer.id)
         if (
-            cutover is None
-            or cutover.device_uid != device.device_uid
-            or not cutover.broker_reference.strip()
-            or _utc(cutover.old_access_revoked_at) < _utc(transfer.requested_at)
-            or _utc(cutover.new_access_verified_at) < _utc(transfer.requested_at)
-            or _utc(cutover.old_access_revoked_at) > current
-            or _utc(cutover.new_access_verified_at) > current
+            identity_check is None
+            or not device.mqtt_device_id
+            or identity_check.device_uid != device.device_uid
+            or identity_check.mqtt_device_id != device.mqtt_device_id
+            or not identity_check.broker_reference.strip()
+            or _utc(identity_check.verified_at) < _utc(transfer.requested_at)
+            or _utc(identity_check.verified_at) > current
+            or current - _utc(identity_check.verified_at) > MAX_IDENTITY_CHECK_AGE
         ):
-            raise TransferRejected("verified MQTT credential cutover required")
+            raise TransferRejected("verified device-scoped MQTT identity required")
+        if identity_verifier is None:
+            raise TransferRejected("live broker identity verification required")
+        verified = identity_verifier.verify(
+            device_uid=device.device_uid,
+            mqtt_device_id=device.mqtt_device_id,
+            broker_reference=identity_check.broker_reference,
+        )
+        if verified is not True:
+            raise TransferRejected("live broker identity verification required")
 
         memberships = list(
             db.scalars(
@@ -128,6 +169,11 @@ def complete_due_transfer(
         # identity and archived measurements stay in the database.
         for membership in memberships:
             db.delete(membership)
+        # The physical reset erases sm039; do not give the next owner the
+        # previous owner's alarm thresholds from the backend either.
+        alarm_configuration = db.get(DeviceAlarmConfiguration, device.id)
+        if alarm_configuration is not None:
+            db.delete(alarm_configuration)
         db.flush()
         db.add(
             DeviceMembership(

@@ -25,6 +25,7 @@ COMMAND_AUTH_ALGORITHM = "HMAC-SHA256"
 COMMAND_AUTH_VERSION = 1
 COMMAND_AUTH_TTL_SECONDS = 30
 LOCAL_HISTORY_RECOVERY_SERVICE = "local_history_recovery"
+ALARM_RULE_RECOVERY_SERVICE = "alarm_rule_recovery"
 
 
 class CommandRisk(str, Enum):
@@ -147,6 +148,9 @@ SERVICE_COMMAND_ALLOWLIST = {
             "get_history",
             "ack_history",
         }
+    ),
+    ALARM_RULE_RECOVERY_SERVICE: frozenset(
+        {"get_alarm_rules", "set_alarm_rule"}
     ),
 }
 

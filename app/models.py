@@ -317,6 +317,34 @@ class Device(Base):
     )
 
 
+class DeviceTariff(Base):
+    """A user's price preference, never sent to or stored by the device."""
+
+    __tablename__ = "device_tariffs"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    eur_per_kwh: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class DeviceAlarmConfiguration(Base):
+    """Owner configuration mirrored to the ESP for offline detection."""
+
+    __tablename__ = "device_alarm_configurations"
+
+    device_id: Mapped[int] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    rules: Mapped[list] = mapped_column(JSON, nullable=False)
+
+
 class DeviceMembership(Base):
     __tablename__ = "device_memberships"
 
@@ -906,6 +934,9 @@ class DeviceResetChallenge(Base):
     device_id: Mapped[int] = mapped_column(
         ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    requested_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
     challenge_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -999,7 +1030,7 @@ class DeviceTransferNotice(Base):
 
 
 class DeviceTransferMqttCutover(Base):
-    """Receipt to be written only after the broker cutover is verified."""
+    """Legacy rotation receipt; not valid for retained-identity transfers."""
 
     __tablename__ = "device_transfer_mqtt_cutovers"
     __table_args__ = (
@@ -1019,5 +1050,30 @@ class DeviceTransferMqttCutover(Base):
         DateTime(timezone=True), nullable=False
     )
     new_access_verified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class DeviceTransferMqttIdentityCheck(Base):
+    """Trusted broker-side check of the retained, device-scoped MQTT identity.
+
+    No public API writes this receipt. It is deliberately distinct from a
+    credential-rotation receipt: ordinary transfers preserve the device key.
+    """
+
+    __tablename__ = "device_transfer_mqtt_identity_checks"
+    __table_args__ = (
+        UniqueConstraint(
+            "broker_reference", name="uq_transfer_mqtt_identity_broker_reference"
+        ),
+    )
+
+    transfer_id: Mapped[int] = mapped_column(
+        ForeignKey("device_transfers.id", ondelete="CASCADE"), primary_key=True
+    )
+    device_uid: Mapped[str] = mapped_column(String(64), nullable=False)
+    mqtt_device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_reference: Mapped[str] = mapped_column(String(128), nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

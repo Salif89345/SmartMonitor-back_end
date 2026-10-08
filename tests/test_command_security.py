@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app.command_security import (
+    ALARM_RULE_RECOVERY_SERVICE,
     COMMAND_POLICIES,
     LOCAL_HISTORY_RECOVERY_SERVICE,
     AuthorizedDeviceCommand,
@@ -38,6 +39,7 @@ class CommandPolicyTests(unittest.TestCase):
             "reset_alarm_rules",
             "ota_update",
             "ota_activate",
+            "restart",
         }
 
         self.assertTrue(current_commands.issubset(COMMAND_POLICIES))
@@ -146,6 +148,22 @@ class CommandPolicyTests(unittest.TestCase):
                     command=command,
                 )
 
+    def test_alarm_recovery_service_cannot_reset_or_restart_device(self):
+        for command in ("get_alarm_rules", "set_alarm_rule"):
+            decision = authorize_service_device_command(
+                service=ALARM_RULE_RECOVERY_SERVICE,
+                device_uid=DEVICE_UID,
+                command=command,
+            )
+            self.assertEqual(decision.command, command)
+        for command in ("reset_alarm_rules", "restart", "set_config"):
+            with self.assertRaises(PermissionError):
+                authorize_service_device_command(
+                    service=ALARM_RULE_RECOVERY_SERVICE,
+                    device_uid=DEVICE_UID,
+                    command=command,
+                )
+
 
 class CommandEnvelopeTests(unittest.TestCase):
     def setUp(self):
@@ -206,6 +224,25 @@ class CommandEnvelopeTests(unittest.TestCase):
         self.assertNotIn(KEY_HEX, serialized)
         self.assertNotIn("must-stay-inside", serialized)
         self.assertEqual(len(payload["parameters"]["mac"]), 64)
+
+    def test_restart_uses_signed_envelope(self):
+        decision = authorize_device_command(
+            role="owner",
+            device_uid=DEVICE_UID,
+            command="restart",
+            confirmation=expected_confirmation("restart", DEVICE_UID),
+        )
+        payload = build_authorized_command_payload(
+            authorization=decision,
+            request_id="restart-1",
+            parameters={},
+            keys_path=str(self.keys_path),
+            now=1_789_300_000,
+            nonce="cd" * 16,
+        )
+        self.assertEqual(payload["command"], "secure_execute")
+        self.assertEqual(payload["parameters"]["device_uid"], DEVICE_UID)
+        self.assertNotIn(KEY_HEX, json.dumps(payload))
 
 
 if __name__ == "__main__":

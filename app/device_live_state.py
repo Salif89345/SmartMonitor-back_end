@@ -558,6 +558,25 @@ class DeviceLiveStateStore:
 
         alarms = self._normalize_alarms(payload.get("alarms"))
 
+        raw_daily = payload.get("daily_energy")
+        daily_energy = None
+        if isinstance(raw_daily, dict):
+            daily_kwh = self._finite_float(raw_daily.get("energy_kwh"))
+            local_date = raw_daily.get("local_date")
+            if (
+                raw_daily.get("ready") is True
+                and raw_daily.get("date_available") is True
+                and daily_kwh is not None
+                and daily_kwh >= 0
+                and daily_kwh <= 1000000000
+                and isinstance(local_date, int)
+                and 20000101 <= local_date <= 99991231
+            ):
+                daily_energy = {
+                    "local_date": local_date,
+                    "energy_kwh": daily_kwh,
+                }
+
         snapshot = {
             "received_at": received_at,
             "measured_at": measured_at,
@@ -656,6 +675,7 @@ class DeviceLiveStateStore:
                 primary_energy.get("power_factor_quality")
             ),
             "alarms": alarms,
+            "daily_energy": daily_energy,
         }
 
         with self._lock:
